@@ -38,7 +38,7 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 
 | Harness | Baca | Tulis | Catatan |
 |---|---|---|---|
-| Claude Code | ya | ya | File JSONL sesi + dibuka di tab Code aplikasi desktop lewat tautan resume |
+| Claude Code | ya | ya | File JSONL sesi, panggilan tool jadi blok tool asli Claude, dibuka di tab Code aplikasi desktop lewat tautan resume |
 | Codex | ya | ya | Rollout + indeks thread |
 | Delta | ya | ya | Lewat CLI resmi, thread selalu privat |
 | OpenCode | ya | ya | Lewat `opencode import` |

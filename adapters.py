@@ -64,6 +64,21 @@ def text_of(content):
     return ''
 
 
+CITATION = re.compile(r':codex-file-citation\{[^}]*?path="([^"]+)"[^}]*\}')  # Codex-only markup, shows raw elsewhere.
+
+
+def tool_input(arg):
+    """Claude tool_use input must be an object: keep dicts and JSON-object strings, wrap anything else."""
+    if isinstance(arg, str):
+        with contextlib.suppress(ValueError):
+            parsed = json.loads(arg)
+            if isinstance(parsed, dict):
+                return parsed
+    if arg is None or isinstance(arg, dict):
+        return arg or {}
+    return {'input': arg if isinstance(arg, str) else json.dumps(arg, ensure_ascii=False)}
+
+
 def title_from(msgs):
     for msg in msgs:
         if msg.role == 'user' and msg.text.strip():
@@ -227,7 +242,10 @@ class Claude(Adapter):
                 if btype == 'text':
                     session.messages.append(Msg(kind, block.get('text', ''), ts))
                 elif btype == 'tool_use':
-                    tool = Msg('tool', '', ts, {'name': block.get('name'), 'input': block.get('input'), 'output': '',
+                    arg = block.get('input')
+                    if isinstance(arg, dict) and list(arg) == ['input'] and isinstance(arg['input'], str):
+                        arg = arg['input']  # Raw-string input wrapped by tool_input(): unwrap so digests match.
+                    tool = Msg('tool', '', ts, {'name': block.get('name'), 'input': arg, 'output': '',
                                                 'id': block.get('id'), 'status': 'pending'})
                     tools[block.get('id')] = tool
                     session.messages.append(tool)
@@ -238,21 +256,36 @@ class Claude(Adapter):
         return session
 
     def _rows(self, session_id, cwd, msgs, parent):
+        """Native Claude rows: text stays text, a tool call becomes a tool_use + tool_result pair."""
         rows = []
-        for msg in flatten(msgs):
+
+        def add(role, content, ts, stop='end_turn'):
+            nonlocal parent
             row_id = str(uuid.uuid4())
-            base = {'parentUuid': parent, 'isSidechain': False, 'type': msg.role, 'uuid': row_id,
-                    'timestamp': iso(msg.ts), 'userType': 'external', 'entrypoint': 'cli', 'cwd': cwd,
-                    'sessionId': session_id, 'version': '2.1.296', 'gitBranch': ''}
-            if msg.role == 'user':
-                base['message'] = {'role': 'user', 'content': msg.text}
-            else:
-                base['message'] = {'model': 'session-bridge', 'id': 'msg_' + uuid.uuid4().hex, 'type': 'message',
-                                   'role': 'assistant', 'content': [{'type': 'text', 'text': msg.text}],
-                                   'stop_reason': 'end_turn', 'stop_sequence': None,
-                                   'usage': {'input_tokens': 0, 'output_tokens': 0}}
-            rows.append(base)
+            row = {'parentUuid': parent, 'isSidechain': False, 'type': role, 'uuid': row_id,
+                   'timestamp': iso(ts), 'userType': 'external', 'entrypoint': 'cli', 'cwd': cwd,
+                   'sessionId': session_id, 'version': '2.1.296', 'gitBranch': ''}
+            row['message'] = {'role': 'user', 'content': content} if role == 'user' else {
+                'model': 'session-bridge', 'id': 'msg_' + uuid.uuid4().hex, 'type': 'message', 'role': 'assistant',
+                'content': content, 'stop_reason': stop, 'stop_sequence': None,
+                'usage': {'input_tokens': 0, 'output_tokens': 0}}
+            rows.append(row)
             parent = row_id
+
+        for msg in clean(msgs):
+            if msg.role == 'tool':
+                tool = msg.tool or {}
+                tool_id = 'toolu_' + uuid.uuid4().hex
+                name = re.sub(r'[^a-zA-Z0-9_-]', '_', str(tool.get('name') or ''))[:64] or 'tool'
+                add('assistant', [{'type': 'tool_use', 'id': tool_id, 'name': name,
+                                   'input': tool_input(tool.get('input'))}], msg.ts, 'tool_use')
+                add('user', [{'type': 'tool_result', 'tool_use_id': tool_id,
+                              'content': cap(tool.get('output')) or '(tanpa output)',
+                              'is_error': tool.get('status') == 'failed'}], msg.ts)
+            elif msg.role == 'user':
+                add('user', msg.text, msg.ts)
+            else:
+                add('assistant', [{'type': 'text', 'text': CITATION.sub(r'`\1`', msg.text)}], msg.ts)
         return rows
 
     def create(self, session):

@@ -310,6 +310,24 @@ def check_files(root):
     assert claude._file(new).parent.name == re.sub(r'[^a-zA-Z0-9]', '-', str(Path.home())), 'missing cwd falls back to home'
     claude._file(new).unlink()
 
+    # Tool calls land as native tool_use/tool_result pairs, not "[tool x]" text; Codex citations become paths.
+    patch = core.Msg('tool', '', 5, {'name': 'apply_patch', 'input': '*** Begin Patch', 'output': 'ok', 'status': 'completed'})
+    shell = core.Msg('tool', '', 6, {'name': 'functions.exec', 'input': '{"cmd": "ls"}', 'output': '', 'status': 'failed'})
+    said = core.Msg('assistant', 'lihat :codex-file-citation{path="D:/x.md" purpose="output"}', 7)
+    new = claude.create(core.Session('codex', 't', 'Tool', cwd=str(box), messages=[core.Msg('user', 'mulai', 4), patch, shell, said]))
+    rows = [r for r in A.json_lines(claude._file(new)) if r.get('type') in ('user', 'assistant')]
+    blocks = [r['message']['content'] for r in rows]
+    assert [b if isinstance(b, str) else b[0]['type'] for b in blocks] == \
+        ['mulai', 'tool_use', 'tool_result', 'tool_use', 'tool_result', 'text'], blocks
+    assert blocks[1][0]['input'] == {'input': '*** Begin Patch'} and blocks[3][0]['input'] == {'cmd': 'ls'}
+    assert blocks[3][0]['name'] == 'functions_exec' and blocks[4][0]['is_error'] and blocks[4][0]['content']
+    assert blocks[2][0]['tool_use_id'] == blocks[1][0]['id'] and blocks[5][0]['text'] == 'lihat `D:/x.md`'
+    assert all(r['parentUuid'] == p['uuid'] for p, r in zip(rows, rows[1:])), 'unbroken parent chain'
+    back = claude.load(new).messages
+    assert [m.role for m in back] == ['user', 'tool', 'tool', 'assistant'] and back[1].tool['output'] == 'ok'
+    assert core.digests([back[1]]) == core.digests([patch]), 'raw-string tool input round-trips'
+    claude._file(new).unlink()
+
     # Read-only stores.
     folder = box / 'copilot/session-state/abc'
     folder.mkdir(parents=True)
