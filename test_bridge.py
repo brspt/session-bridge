@@ -64,6 +64,9 @@ class Mem:
     def busy(self, sid):
         return False
 
+    def reveal(self, sid):
+        self.revealed = getattr(self, 'revealed', []) + [sid]
+
     def has(self, sid):
         return sid in self.store
 
@@ -137,7 +140,8 @@ def check_engine(root):
     loaded = core.load_bundle(path)
     transfer = lambda items, dst: core.transfer([(core.BUNDLE, lambda s=s: s) for s in items], dst)
     assert transfer(loaded, b) == 2 and transfer(loaded, b) == 0 and len(b.store) == 1
-    assert transfer(loaded, a) == 0 and len(a.store) == 1, 'bundle came home'
+    assert b.revealed == ['b1', 'b1'], 'every manual move shows its copy, new or already there'
+    assert transfer(loaded, a) == 0 and len(a.store) == 1 and a.revealed == ['s'], 'bundle came home'
     a.add('s', 'tambah', 'lagi')
     core.export_bundle(a, ['s'], path)
     assert transfer(core.load_bundle(path), b) == 2 and len(b.store['b1']) == 4
@@ -298,22 +302,13 @@ def check_files(root):
     assert added[0]['parentUuid'] == 'a2' and added[1]['parentUuid'] == added[0]['uuid']
     assert texts(claude, sid)[-2:] == ['susulan', 'siap']
 
-    # Desktop Code tab: a new copy gets its own metadata file next to the newest one; existing files stay as they are.
-    account = Path(os.environ['CLAUDE_DESKTOP_DATA']) / 'claude_x/claude-code-sessions/acct/org'
-    account.mkdir(parents=True)
-    mine = account / 'local_mine.json'
-    mine.write_text(json.dumps({'sessionId': 'local_mine', 'model': 'model-x', 'enabledMcpTools': {'t': True}}))
-    original = mine.read_bytes()
+    # A missing cwd falls back to home. Only a manual move opens the desktop app (checked in check_gui), never auto-sync.
+    A.OPENED.clear()
     gone = core.Session('codex', 'g', 'Folder Hilang', cwd=str(box / 'tidak-ada'), messages=[core.Msg('user', 'a'), core.Msg('assistant', 'b')])
     new = claude.create(gone)
-    metas = [json.loads(p.read_text(encoding='utf-8')) for p in account.glob('local_*.json') if p != mine]
-    assert len(metas) == 1 and metas[0]['cliSessionId'] == new and metas[0]['title'] == 'Folder Hilang', metas
-    assert metas[0]['model'] == 'model-x' and metas[0]['cwd'] == str(Path.home()) and mine.read_bytes() == original
+    assert not A.OPENED, A.OPENED
     assert claude._file(new).parent.name == re.sub(r'[^a-zA-Z0-9]', '-', str(Path.home())), 'missing cwd falls back to home'
     claude._file(new).unlink()
-    for path in account.glob('local_*.json'):
-        if path != mine:
-            path.unlink()
 
     # Read-only stores.
     folder = box / 'copilot/session-state/abc'
@@ -630,6 +625,8 @@ def check_gui(root):
         gui.query.set('')
         pick_all()
         gui.dst.set(codex.label)
+        gui.refresh_go()
+        assert gui.go['text'].startswith('Pindahkan 1 sesi') and '⇄' in gui.hint.get()
         gui.execute()
         wait(lambda: 'Selesai: 3 pesan' in said(gui.transfer_log))
         assert len(codex.list()) == 1 and [m.title for m in codex.list()] == ['Judul Asli']
@@ -639,17 +636,16 @@ def check_gui(root):
         wait(lambda: 'tersimpan di' in said(gui.transfer_log))
         assert bundle.exists()
 
-        gui.mode.set('import')
-        gui.on_mode()
-        assert app.BUNDLE_LABEL in gui.src['values'] and app.BUNDLE_LABEL not in gui.dst['values']
-        gui.src.set(app.BUNDLE_LABEL)
-        gui.on_source()
+        assert app.BUNDLE_LABEL in gui.src['values'] and app.BUNDLE_LABEL in gui.dst['values']
+        gui.src.set(claude.label)
+        gui.swap()  # ⇄: bundle becomes the source, Claude the destination.
+        assert (gui.src.get(), gui.dst.get()) == (app.BUNDLE_LABEL, claude.label)
         wait(lambda: gui.bundle)
         pick_all()
-        gui.dst.set(claude.label)
         gui.execute()
         wait(lambda: '[tetap 0] Judul Asli' in said(gui.transfer_log))  # Back home: already linked, not duplicated.
-        wait(lambda: 'tab Code' in said(gui.transfer_log))  # Says where a Claude copy shows up.
+        wait(lambda: f'sudah ada di {claude.label}' in said(gui.transfer_log))
+        assert A.OPENED[-1:] == [claude.list()[0].id], 'a move into Claude opens it in the desktop app, even when already there'
         assert len(claude.list()) == 1 and not gui.list_bar.winfo_manager(), 'loading bar hidden once the list is in'
 
         seed(second, 3600)
@@ -697,7 +693,7 @@ def check_lang():
     import adapters as A
     import app
     import core
-    keys = set(app.HINTS.values()) | {app.DEEPSEEK, app.BUNDLE_LABEL, 'tambah', 'baru', 'sibuk', 'adopsi', 'tetap', 'lewati', 'ekspor'}
+    keys = {app.DEEPSEEK, app.BUNDLE_LABEL, 'tambah', 'baru', 'sibuk', 'adopsi', 'tetap', 'lewati', 'ekspor'}
     keys |= {getattr(c, k) for c in vars(A).values() for k in ('note', 'after')
              if isinstance(c, type) and isinstance(getattr(c, k, None), str) and getattr(c, k)}
     if not getattr(sys, 'frozen', False):  # The EXE carries no sources to scan.
@@ -716,7 +712,9 @@ def run(live=False):
     logging.disable(logging.CRITICAL)
     root = tempfile.mkdtemp(prefix='bridge-', dir=os.environ.get('BRIDGE_TEST_DIR'))
     saved = dict(os.environ)
-    os.environ['CLAUDE_DESKTOP_DATA'] = os.path.join(root, 'desktop')  # Never the real Code tab list.
+    import adapters
+    real_open, adapters.OPENED = adapters.desktop_open, []
+    adapters.desktop_open = adapters.OPENED.append  # Never the real Claude app.
     try:
         check_lang()
         check_engine(root)
@@ -727,6 +725,7 @@ def run(live=False):
             check_live(root)
         return True
     finally:
+        adapters.desktop_open = real_open
         logging.disable(logging.NOTSET)
         os.environ.clear()
         os.environ.update(saved)

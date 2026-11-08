@@ -1,9 +1,9 @@
 # Session Bridge
 
-Satu EXE untuk impor, ekspor, dan sinkron otomatis sesi antar harness AI di Windows.
+Satu EXE untuk memindahkan dan sinkron otomatis chat antar harness AI di Windows.
 Jalankan `SessionBridge.exe`. Tidak perlu instal apa pun, tapi harness tujuan harus sudah terpasang.
 
-> **English:** one Windows EXE to import, export and auto-sync chat sessions between Claude Code, Codex, Delta,
+> **English:** one Windows EXE to move and auto-sync chat sessions between Claude Code, Codex, Delta,
 > OpenCode, Hermes and other detected AI harnesses. Download `SessionBridge.exe` from Releases and run it.
 > Switch the window to English with **Bahasa → English** at the bottom left.
 
@@ -13,15 +13,17 @@ Menu di kiri. Status sinkron otomatis selalu tampil di pojok kiri bawah (klik un
 Di atasnya ada pilihan **Bahasa** (`Indonesia` / `English`). Jendela langsung berganti bahasa dan pilihannya
 tersimpan di `config.json`, juga dipakai output baris perintah.
 
-**Import / Export.** (1) Pilih `Export` atau `Import`, lalu `Dari → Ke`. (2) Centang sesi di tabel
+**Pindahkan.** (1) Pilih `Dari` dan `Ke`. Tombol `⇄` membalik arah. (2) Centang sesi di tabel
 (`Cari` menyaring judul dan folder, `Pilih semua` memilih yang tampil), lalu tekan tombol biru
-`Salin N sesi ke …`. Hasilnya muncul di `Aktivitas`.
+`Pindahkan N sesi ke …`. Hasilnya muncul di `Aktivitas`.
 
-- *Export*: salin sesi terpilih ke harness lain, atau pilih `File bundle (.json)` sebagai tujuan untuk menyimpan ke file.
-- *Import*: masukkan sesi ke harness tujuan, dari harness lain atau dari `File bundle (.json)`.
-- Antar dua harness di PC ini, Export dan Import hasilnya sama. Bedanya hanya arah pilihan dan file bundle.
-- Sesi yang disalin ke Claude Code: aplikasi Claude desktop membaca daftar sesi saat dibuka, jadi tutup lalu buka lagi
-  aplikasinya untuk melihatnya di tab Code. Di terminal, jalankan `claude --resume` dari folder kerja sesi itu.
+- Chat asli di harness asal tetap ada. Data di tujuan tidak diubah atau dihapus.
+- `File bundle (.json)` bisa dipilih di kedua sisi: sebagai `Ke` untuk cadangan atau pindah PC, sebagai `Dari` untuk memasukkannya lagi.
+- Sesi yang dipindahkan ke Claude Code langsung dibuka di tab Code aplikasi Claude desktop (tautan `claude://resume`),
+  tanpa menutup aplikasinya, juga kalau sesinya sudah pernah dipindahkan. Di terminal, jalankan `claude --resume`
+  dari folder kerja sesi itu.
+- Sinkron otomatis tidak membuka aplikasi desktop, supaya jendela tidak berpindah sendiri saat Anda bekerja.
+  Sesi baru hasil sinkron otomatis ke Claude Code: pindahkan sekali lewat halaman ini untuk memunculkannya di tab Code.
 
 **Sinkron Otomatis.** (1) Tambah rute `Dari → Ke` (centang `Dua arah` untuk kedua arah). (2) Atur jadwal dan batas hari. (3) Jalankan:
 
@@ -36,7 +38,7 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 
 | Harness | Baca | Tulis | Catatan |
 |---|---|---|---|
-| Claude Code | ya | ya | File JSONL sesi + entri daftar tab Code aplikasi desktop |
+| Claude Code | ya | ya | File JSONL sesi + dibuka di tab Code aplikasi desktop lewat tautan resume |
 | Codex | ya | ya | Rollout + indeks thread |
 | Delta | ya | ya | Lewat CLI resmi, thread selalu privat |
 | OpenCode | ya | ya | Lewat `opencode import` |

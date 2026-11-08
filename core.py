@@ -261,6 +261,10 @@ def adopt(state, mirror):
 
 # --- Engine ---
 
+def group_for(state, session, src_name):
+    return state.group_of(src_name, session.id) or (session.origin or {}).get('group') or group_id(src_name, session.id)
+
+
 def sync_session(state, session, src_name, dst, dry=False, force=False):
     """Copy what dst lacks. Returns (action, message count); never edits or removes existing data."""
     msgs = clean(session.messages)
@@ -268,7 +272,7 @@ def sync_session(state, session, src_name, dst, dry=False, force=False):
         return 'kosong', 0
     digs = digests(msgs)
     origin = session.origin or {}
-    group = state.group_of(src_name, session.id) or origin.get('group') or group_id(src_name, session.id)
+    group = group_for(state, session, src_name)
     peer = state.peer(group, dst.name)
     if not peer and origin.get('harness') == dst.name and dst.has(origin.get('id')):
         peer = (origin['id'], 1)  # A bundle returning to the machine that exported it.
@@ -391,6 +395,9 @@ def transfer(sessions, dst, log=lambda _: None):
                     log(f'[{tr("lewati")}] {session.title[:60]}: {reason}')
                     continue
                 action, count = sync_session(state, session, src_name, dst, force=True)
+                peer = state.peer(group_for(state, session, src_name), dst.name)
+                if peer:
+                    dst.reveal(peer[0])  # New or already there, the user wants to see it.
             except Exception as error:
                 logging.warning('transfer %s -> %s failed: %s', src_name, dst.name, type(error).__name__)
                 log(tr('GAGAL: {error}', error=tr(str(error))))
@@ -493,18 +500,20 @@ EN = {
     'Baca-saja, terdeteksi otomatis. Format ditebak dari skema tabel.': 'Read-only, detected automatically. Format guessed from the table schema.',
     # Window
     'File bundle (.json)': 'Bundle file (.json)',
-    'Export: sesi diambil DARI harness asal, lalu disalin ke harness lain atau disimpan jadi file bundle (.json) '
-    'untuk cadangan atau pindah PC. Sesi asli tidak berubah.':
-        'Export: sessions are taken FROM the source harness, then copied to another harness or saved as a bundle file (.json) '
-        'for a backup or another PC. The original sessions stay as they are.',
-    'Import: sesi dimasukkan KE harness tujuan, diambil dari harness lain atau dari file bundle (.json) '
-    'hasil Export. Antar dua harness di PC ini, Export dan Import hasilnya sama.':
-        'Import: sessions are put INTO the target harness, from another harness or from a bundle file (.json) '
-        'made by Export. Between two harnesses on this PC, Export and Import do the same thing.',
-    'Aplikasi Claude desktop: tutup lalu buka lagi aplikasinya, sesi muncul di tab Code. '
+    'Aplikasi Claude desktop membuka sesinya di tab Code. '
     'Terminal: jalankan claude --resume dari folder kerja sesi itu.':
-        'Claude desktop app: quit and reopen it, the session then shows in the Code tab. '
+        'The Claude desktop app opens the session in its Code tab. '
         'Terminal: run claude --resume from that session\'s working folder.',
+    '⇄   Pindahkan': '⇄   Move', 'Pindahkan Chat': 'Move Chats',
+    'Pindahkan chat dari satu harness ke harness lain. Bisa juga lewat file bundle (.json) untuk cadangan atau pindah PC.':
+        'Move chats from one harness to another. A bundle file (.json) also works, for a backup or another PC.',
+    'Chat tidak bisa dipindahkan ke {label}: harness ini baca-saja.': 'Chats can\'t be moved into {label}: that harness is read-only.',
+    'Chat dari file bundle dimasukkan ke {dst}.': 'Chats from the bundle file go into {dst}.',
+    'Chat dari {src} disimpan ke file bundle (.json) untuk cadangan atau dibuka di PC lain.':
+        'Chats from {src} are saved to a bundle file (.json), for a backup or to open on another PC.',
+    'Chat dari {src} disalin ke {dst}. Chat asli di {src} tetap ada.': 'Chats from {src} are copied to {dst}. The originals stay in {src}.',
+    'Tekan ⇄ untuk arah sebaliknya.': 'Press ⇄ for the other direction.',
+    'Selesai: tidak ada pesan baru, sesinya sudah ada di {dst}.': 'Done: nothing new, the sessions are already in {dst}.',
     'Memuat sesi dari {h}…': 'Loading sessions from {h}…',
     'DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
     'Harness lain dengan folder sendiri muncul otomatis di sini sebagai baca-saja.\n'
@@ -520,8 +529,6 @@ EN = {
     'Mendeteksi harness…': 'Detecting harnesses…',
     '{n} harness, {w} bisa ditulis': '{n} harnesses, {w} writable',
     '✓ baca + tulis': '✓ read + write', 'baca-saja': 'read-only',
-    'Salin sesi sekali jalan ke harness lain, atau simpan dan buka lewat file bundle.':
-        'Copy sessions once to another harness, or save and open them as a bundle file.',
     'Pilih arah': 'Choose direction', 'Aktivitas': 'Activity', 'Pilih sesi': 'Choose sessions',
     'Muat ulang': 'Reload', 'Pilih semua': 'Select all', 'Cari': 'Search', 'Pilih sesi dulu': 'Choose sessions first',
     'Judul': 'Title', 'Terakhir diubah': 'Last modified', 'Folder kerja': 'Working folder',
@@ -529,14 +536,14 @@ EN = {
     'Memuat…': 'Loading…', '{x} dari {n} sesi': '{x} of {n} sessions', '{n} sesi': '{n} sessions', 'Belum ada sesi': 'No sessions yet',
     'File berisi isi chat apa adanya. Simpan di tempat aman.': 'The file holds the chats as they are. Keep it somewhere safe.',
     'Sesi yang sudah ada di tujuan tidak diubah atau dihapus.': 'Sessions already at the destination are never changed or deleted.',
-    'Simpan {n} sesi ke file  →': 'Save {n} sessions to file  →', 'Salin {n} sesi ke {dst}  →': 'Copy {n} sessions to {dst}  →',
+    'Simpan {n} sesi ke file  →': 'Save {n} sessions to file  →', 'Pindahkan {n} sesi ke {dst}  →': 'Move {n} sessions to {dst}  →',
     'Pilih dulu sesi yang akan disalin.': 'Choose the sessions to copy first.',
     'Asal dan tujuan harus berbeda.': 'Source and destination must differ.',
     'Simpan bundle': 'Save bundle',
     'Selesai: {n} sesi tersimpan di {path}. Isinya chat apa adanya; simpan di tempat aman.':
         'Done: {n} sessions saved to {path}. It holds the chats as they are; keep it somewhere safe.',
-    'Salin {n} sesi dari {src} ke {dst}?\nData yang sudah ada tidak diubah atau dihapus.':
-        'Copy {n} sessions from {src} to {dst}?\nExisting data is never changed or deleted.',
+    'Pindahkan {n} sesi dari {src} ke {dst}?\nChat asli tetap ada. Data di tujuan tidak diubah atau dihapus.':
+        'Move {n} sessions from {src} to {dst}?\nThe originals stay. Nothing at the destination is changed or deleted.',
     'Selesai: {n} pesan disalin.': 'Done: {n} messages copied.',
     'Sedang berjalan…': 'Running…',
     '↻   Sinkron Otomatis': '↻   Auto-sync', 'Sinkron Otomatis': 'Auto-sync',

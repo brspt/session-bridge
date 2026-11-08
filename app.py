@@ -1,4 +1,4 @@
-"""Session Bridge: import, export and auto-sync sessions between the AI harnesses on this machine.
+"""Session Bridge: move and auto-sync chat sessions between the AI harnesses on this machine.
 
     SessionBridge.exe                 GUI
     SessionBridge.exe --detect        harnesses found (JSON)
@@ -38,10 +38,6 @@ LANGS = {'Indonesia': 'id', 'English': 'en'}
 BUNDLE_LABEL = 'File bundle (.json)'  # Shown through tr(); compare with bundle_label().
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_VALUE = 'SessionBridge'
-HINTS = {'export': 'Export: sesi diambil DARI harness asal, lalu disalin ke harness lain atau disimpan jadi file bundle (.json) '
-                   'untuk cadangan atau pindah PC. Sesi asli tidak berubah.',
-         'import': 'Import: sesi dimasukkan KE harness tujuan, diambil dari harness lain atau dari file bundle (.json) '
-                   'hasil Export. Antar dua harness di PC ini, Export dan Import hasilnya sama.'}
 DEEPSEEK = ('DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
             'Harness lain dengan folder sendiri muncul otomatis di sini sebagai baca-saja.\n'
             'File bundle dan salinan sesi memuat isi chat apa adanya, termasuk rahasia yang pernah tertulis di chat.')
@@ -200,8 +196,6 @@ def theme(root):
             ('Radiobutton.focus', {'sticky': 'nswe', 'children': [('Radiobutton.label', {'sticky': 'nswe'})]})]})])
     s.configure('Nav.TRadiobutton', background=SIDE, padding=(14, 10))
     s.map('Nav.TRadiobutton', background=[('selected', CARD), ('active', '#e3e6eb')], foreground=[('selected', ACCENT)], font=[('selected', semi)])
-    s.configure('Seg.TRadiobutton', background='#eceff3', padding=(22, 7))
-    s.map('Seg.TRadiobutton', background=[('selected', ACCENT), ('active', '#e1e5eb')], foreground=[('selected', '#ffffff')], font=[('selected', semi)])
 
     s.configure('TCheckbutton', indicatorbackground=CARD, indicatorforeground='#ffffff', upperbordercolor='#b9bfca', lowerbordercolor='#b9bfca',
                 indicatorsize=round(13 * scale), indicatormargin=(0, 0, round(6 * scale), 0))
@@ -382,14 +376,17 @@ class App:
         label.bind('<Configure>', lambda event: label.configure(wraplength=event.width))
         return label
 
-    def pair(self, parent, width):
-        """`Dari [..] → Ke [..]` on one line."""
+    def pair(self, parent, width, swap=None):
+        """`Dari [..] → Ke [..]` on one line; with `swap`, the arrow is a ⇄ button that flips the direction."""
         line = ttk.Frame(parent)
         line.pack(fill='x')
         ttk.Label(line, text=tr('Dari')).pack(side='left')
         src = ttk.Combobox(line, state='readonly', width=width)
         src.pack(side='left', padx=(8, 0))
-        ttk.Label(line, text='→', style='Arrow.TLabel').pack(side='left', padx=14)
+        if swap:
+            ttk.Button(line, text='⇄', width=3, command=swap).pack(side='left', padx=14)
+        else:
+            ttk.Label(line, text='→', style='Arrow.TLabel').pack(side='left', padx=14)
         ttk.Label(line, text=tr('Ke')).pack(side='left')
         dst = ttk.Combobox(line, state='readonly', width=width)
         dst.pack(side='left', padx=(8, 16))
@@ -444,7 +441,7 @@ class App:
     def on_found(self, found):
         self.adapters = found
         self.by_label = {a.label: a for a in found.values()}
-        self.on_mode()
+        self.fill_pair()
         labels = list(self.by_label)
         targets = [a.label for a in found.values() if a.can_write]
         self.route_src['values'], self.route_dst['values'] = labels, targets
@@ -453,19 +450,14 @@ class App:
             self.route_dst.set(next((t for t in targets if t != labels[0]), ''))
         self.show_routes()
 
-    # --- Import / Export ---
+    # --- Move ---
 
     def build_transfer(self):
-        page = self.add_page('transfer', '⇄   Import / Export', 'Import / Export',
-                             tr('Salin sesi sekali jalan ke harness lain, atau simpan dan buka lewat file bundle.'))
+        page = self.add_page('transfer', tr('⇄   Pindahkan'), tr('Pindahkan Chat'),
+                             tr('Pindahkan chat dari satu harness ke harness lain. Bisa juga lewat file bundle (.json) untuk cadangan atau pindah PC.'))
         body, _ = self.card(page, tr('Pilih arah'), '1')
-        self.mode = tk.StringVar(value='export')
-        line = ttk.Frame(body)
-        line.pack(fill='x', pady=(0, 12))
-        for text, value in (('Export', 'export'), ('Import', 'import')):
-            ttk.Radiobutton(line, text=text, value=value, variable=self.mode, command=self.on_mode, style='Seg.TRadiobutton').pack(side='left')
-        _, self.src, self.dst = self.pair(body, 30)
-        self.hint = tk.StringVar(value=tr(HINTS['export']))
+        _, self.src, self.dst = self.pair(body, 30, swap=self.swap)
+        self.hint = tk.StringVar()
         self.wrap(ttk.Label(body, textvariable=self.hint, style='Muted.TLabel')).pack(fill='x', pady=(10, 0))
         self.src.bind('<<ComboboxSelected>>', lambda _event: self.on_source())
         self.dst.bind('<<ComboboxSelected>>', lambda _event: self.refresh_go())
@@ -495,19 +487,26 @@ class App:
         self.tree.bind('<<TreeviewSelect>>', lambda _event: self.refresh_go())
         self.tree.bind('<Control-a>', lambda _event: self.pick_all())
 
-    def on_mode(self):
-        mode = self.mode.get()
-        self.hint.set(tr(HINTS[mode]))
-        labels = list(self.by_label)
+    def fill_pair(self):
+        """Both ends offer the bundle file; only writable harnesses can be a destination."""
         targets = [a.label for a in self.adapters.values() if a.can_write]
-        self.src['values'] = labels + [bundle_label()] if mode == 'import' else labels
-        self.dst['values'] = targets + [bundle_label()] if mode == 'export' else targets
+        self.src['values'] = list(self.by_label) + [bundle_label()]
+        self.dst['values'] = targets + [bundle_label()]
         if self.src.get() not in self.src['values']:
-            self.src.set(labels[0] if labels else '')
+            self.src.set(next(iter(self.by_label), ''))
             self.on_source()
-        if self.dst.get() not in self.dst['values']:
+        if self.dst.get() not in self.dst['values'] or self.dst.get() == self.src.get():
             self.dst.set(next((t for t in targets if t != self.src.get()), ''))
         self.refresh_go()
+
+    def swap(self):
+        src, dst = self.src.get(), self.dst.get()
+        if src not in self.dst['values']:
+            messagebox.showinfo('Session Bridge', tr('Chat tidak bisa dipindahkan ke {label}: harness ini baca-saja.', label=src))
+            return
+        self.src.set(dst)
+        self.dst.set(src)
+        self.on_source()
 
     def on_source(self):
         if self.src.get() != bundle_label():
@@ -515,6 +514,7 @@ class App:
             return
         path = filedialog.askopenfilename(title=tr('Pilih file bundle'), filetypes=[(tr('Bundle Session Bridge'), '*.json')])
         if not path:
+            self.on_bundle(self.bundle)  # Never leave another harness's rows under a bundle source.
             return
         self.bundle = []
         self.show([])
@@ -566,12 +566,19 @@ class App:
         return 'break'
 
     def refresh_go(self):
-        picked, dst = len(self.tree.selection()), self.dst.get()
+        picked, src, dst = len(self.tree.selection()), self.src.get() or '…', self.dst.get() or '…'
         bundle = dst == bundle_label()
+        if src == bundle_label():
+            hint = tr('Chat dari file bundle dimasukkan ke {dst}.', dst=dst)
+        elif bundle:
+            hint = tr('Chat dari {src} disimpan ke file bundle (.json) untuk cadangan atau dibuka di PC lain.', src=src)
+        else:
+            hint = tr('Chat dari {src} disalin ke {dst}. Chat asli di {src} tetap ada.', src=src, dst=dst)
+        self.hint.set(f"{hint} {tr('Tekan ⇄ untuk arah sebaliknya.')}")
         self.go_note.set(tr('File berisi isi chat apa adanya. Simpan di tempat aman.') if bundle else
                          tr('Sesi yang sudah ada di tujuan tidak diubah atau dihapus.'))
         if self.go.instate(['!disabled']):
-            self.go.configure(text=(tr('Simpan {n} sesi ke file  →', n=picked) if bundle else tr('Salin {n} sesi ke {dst}  →', n=picked, dst=dst or '…'))
+            self.go.configure(text=(tr('Simpan {n} sesi ke file  →', n=picked) if bundle else tr('Pindahkan {n} sesi ke {dst}  →', n=picked, dst=dst))
                            if picked else tr('Pilih sesi dulu'))
 
     def execute(self):
@@ -594,7 +601,7 @@ class App:
             finish = lambda n: tr('Selesai: {n} sesi tersimpan di {path}. Isinya chat apa adanya; simpan di tempat aman.', n=n, path=path)
         else:
             dst = self.by_label[dst_label]
-            question = tr('Salin {n} sesi dari {src} ke {dst}?\nData yang sudah ada tidak diubah atau dihapus.', n=len(picks), src=src_label, dst=dst.label)
+            question = tr('Pindahkan {n} sesi dari {src} ke {dst}?\nChat asli tetap ada. Data di tujuan tidak diubah atau dihapus.', n=len(picks), src=src_label, dst=dst.label)
             if not messagebox.askyesno('Session Bridge', question):
                 return
             if src_label == bundle_label():
@@ -603,7 +610,9 @@ class App:
                 src = self.by_label[src_label]
                 pairs = [(src.name, lambda i=i: src.load(i)) for i in picks]
             work = lambda: core.transfer(pairs, dst, log)
-            finish = lambda n: tr('Selesai: {n} pesan disalin.', n=n) + (f'\n{tr(dst.after)}' if dst.after else '')
+            finish = lambda n: ((tr('Selesai: {n} pesan disalin.', n=n) if n else
+                                 tr('Selesai: tidak ada pesan baru, sesinya sudah ada di {dst}.', dst=dst.label))
+                                + (f'\n{tr(dst.after)}' if dst.after else ''))
         self.go.configure(text=tr('Sedang berjalan…'))
         self.go.state(['disabled'])
 
