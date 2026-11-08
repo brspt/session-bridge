@@ -493,8 +493,19 @@ EN = {
     'Baca-saja, terdeteksi otomatis. Format ditebak dari skema tabel.': 'Read-only, detected automatically. Format guessed from the table schema.',
     # Window
     'File bundle (.json)': 'Bundle file (.json)',
-    'Kirim sesi ke harness lain, atau simpan sebagai file bundle.': 'Send sessions to another harness, or save them as a bundle file.',
-    'Masukkan sesi ke sebuah harness, dari harness lain atau dari file bundle.': 'Bring sessions into a harness, from another harness or a bundle file.',
+    'Export: sesi diambil DARI harness asal, lalu disalin ke harness lain atau disimpan jadi file bundle (.json) '
+    'untuk cadangan atau pindah PC. Sesi asli tidak berubah.':
+        'Export: sessions are taken FROM the source harness, then copied to another harness or saved as a bundle file (.json) '
+        'for a backup or another PC. The original sessions stay as they are.',
+    'Import: sesi dimasukkan KE harness tujuan, diambil dari harness lain atau dari file bundle (.json) '
+    'hasil Export. Antar dua harness di PC ini, Export dan Import hasilnya sama.':
+        'Import: sessions are put INTO the target harness, from another harness or from a bundle file (.json) '
+        'made by Export. Between two harnesses on this PC, Export and Import do the same thing.',
+    'Aplikasi Claude desktop: tutup lalu buka lagi aplikasinya, sesi muncul di tab Code. '
+    'Terminal: jalankan claude --resume dari folder kerja sesi itu.':
+        'Claude desktop app: quit and reopen it, the session then shows in the Code tab. '
+        'Terminal: run claude --resume from that session\'s working folder.',
+    'Memuat sesi dari {h}…': 'Loading sessions from {h}…',
     'DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
     'Harness lain dengan folder sendiri muncul otomatis di sini sebagai baca-saja.\n'
     'File bundle dan salinan sesi memuat isi chat apa adanya, termasuk rahasia yang pernah tertulis di chat.':

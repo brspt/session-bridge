@@ -9,6 +9,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -296,6 +297,23 @@ def check_files(root):
     added = [json.loads(x) for x in after[len(before):].splitlines()]
     assert added[0]['parentUuid'] == 'a2' and added[1]['parentUuid'] == added[0]['uuid']
     assert texts(claude, sid)[-2:] == ['susulan', 'siap']
+
+    # Desktop Code tab: a new copy gets its own metadata file next to the newest one; existing files stay as they are.
+    account = Path(os.environ['CLAUDE_DESKTOP_DATA']) / 'claude_x/claude-code-sessions/acct/org'
+    account.mkdir(parents=True)
+    mine = account / 'local_mine.json'
+    mine.write_text(json.dumps({'sessionId': 'local_mine', 'model': 'model-x', 'enabledMcpTools': {'t': True}}))
+    original = mine.read_bytes()
+    gone = core.Session('codex', 'g', 'Folder Hilang', cwd=str(box / 'tidak-ada'), messages=[core.Msg('user', 'a'), core.Msg('assistant', 'b')])
+    new = claude.create(gone)
+    metas = [json.loads(p.read_text(encoding='utf-8')) for p in account.glob('local_*.json') if p != mine]
+    assert len(metas) == 1 and metas[0]['cliSessionId'] == new and metas[0]['title'] == 'Folder Hilang', metas
+    assert metas[0]['model'] == 'model-x' and metas[0]['cwd'] == str(Path.home()) and mine.read_bytes() == original
+    assert claude._file(new).parent.name == re.sub(r'[^a-zA-Z0-9]', '-', str(Path.home())), 'missing cwd falls back to home'
+    claude._file(new).unlink()
+    for path in account.glob('local_*.json'):
+        if path != mine:
+            path.unlink()
 
     # Read-only stores.
     folder = box / 'copilot/session-state/abc'
@@ -631,7 +649,8 @@ def check_gui(root):
         gui.dst.set(claude.label)
         gui.execute()
         wait(lambda: '[tetap 0] Judul Asli' in said(gui.transfer_log))  # Back home: already linked, not duplicated.
-        assert len(claude.list()) == 1
+        wait(lambda: 'tab Code' in said(gui.transfer_log))  # Says where a Claude copy shows up.
+        assert len(claude.list()) == 1 and not gui.list_bar.winfo_manager(), 'loading bar hidden once the list is in'
 
         seed(second, 3600)
         gui.since.set('0')
@@ -679,7 +698,8 @@ def check_lang():
     import app
     import core
     keys = set(app.HINTS.values()) | {app.DEEPSEEK, app.BUNDLE_LABEL, 'tambah', 'baru', 'sibuk', 'adopsi', 'tetap', 'lewati', 'ekspor'}
-    keys |= {c.note for c in vars(A).values() if isinstance(c, type) and isinstance(getattr(c, 'note', None), str) and c.note}
+    keys |= {getattr(c, k) for c in vars(A).values() for k in ('note', 'after')
+             if isinstance(c, type) and isinstance(getattr(c, k, None), str) and getattr(c, k)}
     if not getattr(sys, 'frozen', False):  # The EXE carries no sources to scan.
         for module in (app, core, A):
             for node in ast.walk(ast.parse(Path(module.__file__).read_text(encoding='utf-8'))):
@@ -696,6 +716,7 @@ def run(live=False):
     logging.disable(logging.CRITICAL)
     root = tempfile.mkdtemp(prefix='bridge-', dir=os.environ.get('BRIDGE_TEST_DIR'))
     saved = dict(os.environ)
+    os.environ['CLAUDE_DESKTOP_DATA'] = os.path.join(root, 'desktop')  # Never the real Code tab list.
     try:
         check_lang()
         check_engine(root)

@@ -19,6 +19,9 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 
 - *Export*: salin sesi terpilih ke harness lain, atau pilih `File bundle (.json)` sebagai tujuan untuk menyimpan ke file.
 - *Import*: masukkan sesi ke harness tujuan, dari harness lain atau dari `File bundle (.json)`.
+- Antar dua harness di PC ini, Export dan Import hasilnya sama. Bedanya hanya arah pilihan dan file bundle.
+- Sesi yang disalin ke Claude Code: aplikasi Claude desktop membaca daftar sesi saat dibuka, jadi tutup lalu buka lagi
+  aplikasinya untuk melihatnya di tab Code. Di terminal, jalankan `claude --resume` dari folder kerja sesi itu.
 
 **Sinkron Otomatis.** (1) Tambah rute `Dari → Ke` (centang `Dua arah` untuk kedua arah). (2) Atur jadwal dan batas hari. (3) Jalankan:
 
@@ -33,7 +36,7 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 
 | Harness | Baca | Tulis | Catatan |
 |---|---|---|---|
-| Claude Code | ya | ya | File JSONL sesi |
+| Claude Code | ya | ya | File JSONL sesi + entri daftar tab Code aplikasi desktop |
 | Codex | ya | ya | Rollout + indeks thread |
 | Delta | ya | ya | Lewat CLI resmi, thread selalu privat |
 | OpenCode | ya | ya | Lewat `opencode import` |

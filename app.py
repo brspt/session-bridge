@@ -38,8 +38,10 @@ LANGS = {'Indonesia': 'id', 'English': 'en'}
 BUNDLE_LABEL = 'File bundle (.json)'  # Shown through tr(); compare with bundle_label().
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_VALUE = 'SessionBridge'
-HINTS = {'export': 'Kirim sesi ke harness lain, atau simpan sebagai file bundle.',
-         'import': 'Masukkan sesi ke sebuah harness, dari harness lain atau dari file bundle.'}
+HINTS = {'export': 'Export: sesi diambil DARI harness asal, lalu disalin ke harness lain atau disimpan jadi file bundle (.json) '
+                   'untuk cadangan atau pindah PC. Sesi asli tidak berubah.',
+         'import': 'Import: sesi dimasukkan KE harness tujuan, diambil dari harness lain atau dari file bundle (.json) '
+                   'hasil Export. Antar dua harness di PC ini, Export dan Import hasilnya sama.'}
 DEEPSEEK = ('DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
             'Harness lain dengan folder sendiri muncul otomatis di sini sebagai baca-saja.\n'
             'File bundle dan salinan sesi memuat isi chat apa adanya, termasuk rahasia yang pernah tertulis di chat.')
@@ -210,6 +212,8 @@ def theme(root):
         s.map(name, bordercolor=[('focus', ACCENT)], lightcolor=[('focus', ACCENT)], background=[('active', CARD)],
               fieldbackground=[('readonly', CARD)], selectbackground=[('readonly', CARD)], selectforeground=[('readonly', TEXT)])
 
+    s.configure('Horizontal.TProgressbar', troughcolor=BG, bordercolor=LINE, thickness=round(6 * scale),
+                **dict.fromkeys(('background', 'lightcolor', 'darkcolor'), ACCENT))
     s.configure('Treeview', fieldbackground=CARD, bordercolor=CARD, rowheight=tkfont.nametofont('TkDefaultFont').metrics('linespace') + round(10 * scale))
     s.map('Treeview', background=[('selected', ACCENT_SOFT)], foreground=[('selected', TEXT)])
     s.configure('Treeview.Heading', foreground=MUTED, bordercolor=LINE, relief='flat', font=('Segoe UI Semibold', 9), padding=(4, 6))
@@ -302,7 +306,18 @@ class App:
                 self.jobs.put(lambda r=result: done(r))
         threading.Thread(target=body, daemon=True).start()
 
+    def busy(self, bar, on):
+        """Indeterminate bar beside a card title while work runs off the UI thread."""
+        if on:
+            bar.pack(side='left', padx=10)
+            bar.start(12)
+        else:
+            bar.stop()
+            bar.pack_forget()
+
     def fail(self, error):
+        self.busy(self.list_bar, False)
+        self.busy(self.harness_bar, False)
         self.go.state(['!disabled'])
         self.detect_btn.state(['!disabled'])
         self.refresh_go()
@@ -405,6 +420,10 @@ class App:
     def detect(self):
         self.detect_btn.state(['disabled'])
         self.harness_status.set(tr('Mendeteksi harness…'))
+        self.busy(self.harness_bar, True)
+        if not self.adapters:  # First run: the session list waits on the scan too.
+            self.count.set(tr('Mendeteksi harness…'))
+            self.busy(self.list_bar, True)
 
         def work():
             found = A.registry()
@@ -412,6 +431,7 @@ class App:
             return A.detect_rows(found)
 
         def done(rows):
+            self.busy(self.harness_bar, False)
             self.detect_btn.state(['!disabled'])
             self.harness_status.set(tr('{n} harness, {w} bisa ditulis', n=len(rows), w=sum(bool(r['write']) for r in rows)))
             self.harnesses.delete(*self.harnesses.get_children())
@@ -444,9 +464,9 @@ class App:
         line.pack(fill='x', pady=(0, 12))
         for text, value in (('Export', 'export'), ('Import', 'import')):
             ttk.Radiobutton(line, text=text, value=value, variable=self.mode, command=self.on_mode, style='Seg.TRadiobutton').pack(side='left')
-        self.hint = tk.StringVar()
-        ttk.Label(line, textvariable=self.hint, style='Muted.TLabel').pack(side='left', padx=16)
         _, self.src, self.dst = self.pair(body, 30)
+        self.hint = tk.StringVar(value=tr(HINTS['export']))
+        self.wrap(ttk.Label(body, textvariable=self.hint, style='Muted.TLabel')).pack(fill='x', pady=(10, 0))
         self.src.bind('<<ComboboxSelected>>', lambda _event: self.on_source())
         self.dst.bind('<<ComboboxSelected>>', lambda _event: self.refresh_go())
 
@@ -457,6 +477,7 @@ class App:
         body, head = self.card(page, tr('Pilih sesi'), '2', fill='both', expand=True)
         self.count = tk.StringVar()
         ttk.Label(head, textvariable=self.count, style='Muted.TLabel').pack(side='left', padx=10)
+        self.list_bar = ttk.Progressbar(head, mode='indeterminate', length=round(110 * self.scale))
         ttk.Button(head, text=tr('Muat ulang'), command=self.load_list).pack(side='right')
         ttk.Button(head, text=tr('Pilih semua'), command=self.pick_all).pack(side='right', padx=8)
         self.query = tk.StringVar()
@@ -497,6 +518,8 @@ class App:
             return
         self.bundle = []
         self.show([])
+        self.count.set(tr('Memuat…'))
+        self.busy(self.list_bar, True)
         self.run(lambda: core.load_bundle(path), self.on_bundle)
 
     def on_bundle(self, sessions):
@@ -510,12 +533,15 @@ class App:
             return
         adapter = self.by_label.get(label)
         if not adapter:
+            self.show([])
             return
         self.show([])
-        self.count.set(tr('Memuat…'))
+        self.count.set(tr('Memuat sesi dari {h}…', h=label))
+        self.busy(self.list_bar, True)
         self.run(adapter.list, lambda metas: self.src.get() == label and self.show(metas))
 
     def show(self, metas):
+        self.busy(self.list_bar, False)
         unique = {m.id: m for m in metas}  # A store can hold one id twice (active and archived); Treeview ids must be unique.
         self.metas = sorted(unique.values(), key=lambda m: m.updated, reverse=True)
         self.tree.delete(*self.tree.get_children())
@@ -577,7 +603,7 @@ class App:
                 src = self.by_label[src_label]
                 pairs = [(src.name, lambda i=i: src.load(i)) for i in picks]
             work = lambda: core.transfer(pairs, dst, log)
-            finish = lambda n: tr('Selesai: {n} pesan disalin.', n=n)
+            finish = lambda n: tr('Selesai: {n} pesan disalin.', n=n) + (f'\n{tr(dst.after)}' if dst.after else '')
         self.go.configure(text=tr('Sedang berjalan…'))
         self.go.state(['disabled'])
 
@@ -744,6 +770,7 @@ class App:
         body, head = self.card(page, tr('Daftar harness'), fill='both', expand=True)
         self.harness_status = tk.StringVar()
         ttk.Label(head, textvariable=self.harness_status, style='Muted.TLabel').pack(side='left', padx=10)
+        self.harness_bar = ttk.Progressbar(head, mode='indeterminate', length=round(110 * self.scale))
         self.detect_btn = ttk.Button(head, text=tr('Deteksi ulang'), command=self.detect)
         self.detect_btn.pack(side='right')
         self.harness_note = tk.StringVar(value=tr('Pilih satu baris untuk membaca lokasi dan catatan lengkapnya.'))

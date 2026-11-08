@@ -103,6 +103,7 @@ class Adapter:
     name = label = ''
     can_write = False
     note = ''
+    after = ''  # Where a copy shows up, said after a manual copy into this harness.
 
     def available(self):
         return False
@@ -132,9 +133,34 @@ class Adapter:
         return any(m.id == session_id for m in self.list())
 
 
+def desktop_index(cli_id, cwd, title):
+    """The Claude desktop app's Code tab lists only sessions that have a metadata file in its own store; the CLI needs none.
+    Adds one beside the newest existing file (that folder is the signed-in account). Never touches existing files."""
+    store = Path(os.environ.get('CLAUDE_DESKTOP_DATA') or LOCAL / 'Claude-Data')
+    files = list(store.glob('claude_*/claude-code-sessions/*/*/local_*.json'))
+    if not files:
+        return None
+    newest = max(files, key=lambda p: p.stat().st_mtime)
+    like = json.loads(newest.read_text(encoding='utf-8'))
+    now = int(time.time() * 1000)
+    meta = {'sessionId': f'local_{uuid.uuid4()}', 'cliSessionId': cli_id, 'cwd': cwd, 'originCwd': cwd,
+            'createdAt': now, 'lastActivityAt': now, 'lastFocusedAt': now, 'model': like.get('model') or 'claude-opus-5-5',
+            'effort': 'high', 'isArchived': False, 'title': title or 'Session Bridge', 'titleSource': 'user',
+            'permissionMode': 'acceptEdits', 'enabledMcpTools': like.get('enabledMcpTools') or {},
+            'remoteMcpServersConfig': like.get('remoteMcpServersConfig') or [], 'alwaysAllowedReasons': [],
+            'sessionPermissionUpdates': []}
+    path = newest.parent / f"{meta['sessionId']}.json"
+    temp = path.with_suffix('.tmp')  # The app may read the folder mid-write.
+    temp.write_text(json.dumps(meta, ensure_ascii=False), encoding='utf-8')
+    os.replace(temp, path)
+    return path
+
+
 class Claude(Adapter):
     name, label, can_write = 'claude', 'Claude Code', True
     note = 'Termasuk sesi profil DeepSeek/lainnya yang berjalan lewat Claude Code.'
+    after = ('Aplikasi Claude desktop: tutup lalu buka lagi aplikasinya, sesi muncul di tab Code. '
+             'Terminal: jalankan claude --resume dari folder kerja sesi itu.')
 
     @property
     def root(self):
@@ -244,7 +270,7 @@ class Claude(Adapter):
         return rows
 
     def create(self, session):
-        cwd = session.cwd or str(HOME)
+        cwd = session.cwd if session.cwd and os.path.isdir(session.cwd) else str(HOME)  # Resume fails in a missing folder.
         folder = self.root / re.sub(r'[^a-zA-Z0-9]', '-', cwd)
         folder.mkdir(parents=True, exist_ok=True)
         session_id = str(uuid.uuid4())
@@ -254,6 +280,8 @@ class Claude(Adapter):
             rows.append({'type': 'custom-title', 'customTitle': title, 'sessionId': session_id})
         with open(folder / f'{session_id}.jsonl', 'w', encoding='utf-8', newline='\n') as handle:
             handle.writelines(json.dumps(r, ensure_ascii=False) + '\n' for r in rows)
+        with contextlib.suppress(OSError, ValueError):  # The CLI copy stands even if the desktop list can't be told.
+            desktop_index(session_id, cwd, title)
         return session_id
 
     def append(self, session_id, msgs):
