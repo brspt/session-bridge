@@ -41,7 +41,7 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 | Claude Code | ya | ya | File JSONL sesi, panggilan tool jadi blok tool asli Claude, dibuka di tab Code aplikasi desktop lewat tautan resume |
 | Codex | ya | ya | Rollout + indeks thread |
 | Delta | ya | ya | Lewat CLI resmi, thread selalu privat |
-| OpenCode | ya | ya | Lewat `opencode import` |
+| OpenCode | ya | ya | Lewat CLI aplikasi desktop OpenCode 2.x (`session import`, tabel `session_v2`); 1.x lewat `opencode import` |
 | Hermes | ya | ya | Backup DB sebelum menulis (satu per hari, simpan 7) |
 | Copilot CLI | ya | tidak | CLI tidak bisa dijalankan di sini, jadi hasil tulis tak bisa diverifikasi |
 | AionUi | ya | tidak | Percakapan menyimpan konfigurasi agen yang tak bisa disusun dari luar |

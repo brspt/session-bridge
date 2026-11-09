@@ -656,8 +656,16 @@ class OpenCode(Adapter):
         return (Path(base) if base else HOME / '.local/share') / 'opencode/opencode.db'
 
     @property
+    def cli2(self):
+        """OpenCode 2.x CLI shipped with the desktop app. 2.x reads sessions from session_v2, which 1.x import never fills."""
+        staged = Path(os.environ.get('APPDATA') or HOME / 'AppData/Roaming').glob('ai.opencode.desktop/cli/*/opencode-cli.exe')
+        bundled = Path(os.environ.get('LOCALAPPDATA') or HOME / 'AppData/Local') / 'Programs/ai.opencode.desktop/resources/opencode-cli.exe'
+        found = sorted(staged, key=lambda p: p.stat().st_mtime, reverse=True) + [bundled]
+        return next((str(p) for p in found if p.is_file()), None)
+
+    @property
     def exe(self):
-        return shutil.which('opencode.cmd') or shutil.which('opencode')
+        return self.cli2 or shutil.which('opencode.cmd') or shutil.which('opencode')
 
     def available(self):
         return self.db.exists() or bool(self.exe)
@@ -665,15 +673,21 @@ class OpenCode(Adapter):
     def location(self):
         return str(self.db)
 
+    def _v2(self, conn):
+        return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'").fetchone())
+
     def list(self):
         if not self.db.exists():
             return []
         with contextlib.closing(ro(self.db)) as conn:
-            rows = conn.execute('SELECT id, title, time_updated, directory FROM session WHERE parent_id IS NULL').fetchall()
+            table = 'session_v2' if self._v2(conn) else 'session'
+            rows = conn.execute(f'SELECT id, title, time_updated, directory FROM {table} WHERE parent_id IS NULL').fetchall()
         return [Meta(r[0], r[1] or r[0], epoch(r[2]), r[3] or '', str(r[2])) for r in rows]
 
     def load(self, session_id):
         with contextlib.closing(ro(self.db)) as conn:
+            if self._v2(conn):
+                return self._load2(conn, session_id)
             row = conn.execute('SELECT title, directory, time_created, time_updated FROM session WHERE id=?',
                                (session_id,)).fetchone()
             if not row:
@@ -696,9 +710,40 @@ class OpenCode(Adapter):
                             'id': block.get('callID'), 'status': state.get('status')}))
         return session
 
-    def _cli(self, command, cwd):
-        done = subprocess.run(f'"{self.exe}" {command}', shell=True, cwd=cwd, capture_output=True, encoding='utf-8',
+    def _load2(self, conn, session_id):
+        row = conn.execute('SELECT title, directory, time_created, time_updated FROM session_v2 WHERE id=?',
+                           (session_id,)).fetchone()
+        if not row:
+            raise KeyError(session_id)
+        session = Session(self.name, session_id, row[0] or '', row[1] or '', epoch(row[2]), epoch(row[3]))
+        for kind, data in conn.execute('SELECT type, data FROM session_message WHERE session_id=? ORDER BY seq',
+                                       (session_id,)).fetchall():
+            info = json.loads(data)
+            ts = epoch((info.get('time') or {}).get('created'))
+            if kind == 'user':
+                session.messages.append(Msg('user', info.get('text') or '', ts))
+            elif kind == 'assistant':  # system, synthetic, idle and switch notices are the harness's own, not the chat.
+                session.model = (info.get('model') or {}).get('id') or session.model
+                for block in info.get('content') or []:
+                    if block.get('type') == 'text':
+                        session.messages.append(Msg('assistant', block.get('text', ''), ts))
+                    elif block.get('type') == 'tool':
+                        state = block.get('state') or {}
+                        output = '\n'.join(c.get('text', '') for c in state.get('content') or [] if c.get('type') == 'text')
+                        session.messages.append(Msg('tool', '', ts, {
+                            'name': block.get('name'), 'input': state.get('input'), 'output': output,
+                            'id': block.get('id'), 'status': state.get('status')}))
+        return session
+
+    def _run(self, command, cwd):
+        return subprocess.run(f'"{self.exe}" {command}', shell=True, cwd=cwd, capture_output=True, encoding='utf-8',
                               timeout=180, creationflags=NO_WINDOW)
+
+    def _cli(self, command, cwd):
+        if self.cli2 and not self._run('service status', cwd).stdout.strip().startswith('http'):
+            # Through the running background service the open desktop app shows the change at once; without one, write the db.
+            command = f'--standalone {command}'
+        done = self._run(command, cwd)
         if done.returncode:
             raise RuntimeError(f'opencode: {done.stderr.strip()[-200:]}')
         return done.stdout
@@ -729,32 +774,72 @@ class OpenCode(Adapter):
             out.append({'info': info, 'parts': [part]})
         return out
 
+    MODEL2 = {'id': 'imported', 'providerID': 'bridge', 'variant': 'default'}
+    TOKENS = {'input': 0, 'output': 0, 'reasoning': 0, 'cache': {'read': 0, 'write': 0}}
+
+    def _docs2(self, msgs):
+        out = []
+        for index, msg in enumerate(flatten(msgs)):
+            ts = msg.ts or time.time()
+            ms = int(ts * 1000)
+            doc = {'id': self._new_id('msg', ts + index / 1000), 'time': {'created': ms}}
+            if msg.role == 'user':
+                doc.update(type='user', text=msg.text, files=[], agents=[])
+            else:
+                doc.update(type='assistant', agent='build', model=self.MODEL2, content=[{'type': 'text', 'text': msg.text}],
+                           finish='stop', cost=0, tokens=self.TOKENS, time={'created': ms, 'completed': ms})
+            out.append(doc)
+        return out
+
     def _import(self, doc, cwd):
         cwd = cwd if Path(cwd).is_dir() else str(HOME)  # Import stamps the session with its own cwd.
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'session.json'
             path.write_text(json.dumps(doc, ensure_ascii=False), encoding='utf-8')
-            self._cli(f'import "{path}"', cwd)
+            # 2.x files the session under the project of --directory, which the desktop sidebar lists.
+            self._cli(f'session import "{path}" --directory "{cwd}"' if self.cli2 else f'import "{path}"', cwd)
 
     def create(self, session):
         now = time.time()
         session_id = self._new_id('ses', now, descending=True)
         cwd = session.cwd if session.cwd and Path(session.cwd).is_dir() else str(HOME)
         ms = int(now * 1000)
-        info = {'id': session_id, 'slug': 'session-bridge', 'projectID': 'global', 'directory': cwd,
-                'title': session.title or title_from(session.messages) or 'Sesi', 'version': '1.18.33',
-                'time': {'created': int((session.created or now) * 1000), 'updated': ms}}
-        self._import({'info': info, 'messages': self._docs(session_id, session.messages, cwd)}, cwd)
+        title = session.title or title_from(session.messages) or 'Sesi'
+        created = int((session.created or now) * 1000)
+        if self.cli2:
+            info = {'id': session_id, 'projectID': 'global', 'title': title, 'agent': 'build', 'model': self.MODEL2,
+                    'cost': 0, 'tokens': self.TOKENS, 'time': {'created': created, 'updated': ms}, 'permissions': [],
+                    'location': {'directory': cwd}}
+            doc = {'info': info, 'messages': self._docs2(session.messages)}
+        else:
+            info = {'id': session_id, 'slug': 'session-bridge', 'projectID': 'global', 'directory': cwd, 'title': title,
+                    'version': '1.18.33', 'time': {'created': created, 'updated': ms}}
+            doc = {'info': info, 'messages': self._docs(session_id, session.messages, cwd)}
+        self._import(doc, cwd)
         return session_id
 
     def append(self, session_id, msgs):
-        raw = self._cli(f'export {session_id}', str(HOME))
+        raw = self._cli(f'session export {session_id}' if self.cli2 else f'export {session_id}', str(HOME))
         doc = json.loads(raw[raw.find('{'):])
-        cwd = doc['info'].get('directory') or str(HOME)
-        users = [m['info']['id'] for m in doc['messages'] if m['info'].get('role') == 'user']
-        doc['messages'] += self._docs(session_id, msgs, cwd, users[-1] if users else None)
+        if self.cli2:
+            cwd = (doc['info'].get('location') or {}).get('directory') or str(HOME)
+            doc['messages'] += self._docs2(msgs)
+        else:
+            cwd = doc['info'].get('directory') or str(HOME)
+            users = [m['info']['id'] for m in doc['messages'] if m['info'].get('role') == 'user']
+            doc['messages'] += self._docs(session_id, msgs, cwd, users[-1] if users else None)
         doc['info'].setdefault('time', {})['updated'] = int(time.time() * 1000)
-        self._import(doc, cwd)  # Import upserts by id, so existing rows stay as they are.
+        if self.cli2:
+            # 2.x import refuses an existing id ("Session already exists"), so replace it under the same id.
+            # Delete also drops child sessions, which the export does not carry.
+            with contextlib.closing(ro(self.db)) as conn:
+                if conn.execute('SELECT 1 FROM session_v2 WHERE parent_id=?', (session_id,)).fetchone():
+                    raise RuntimeError(tr('opencode: sesi {id} punya sub-sesi, tidak bisa disambung', id=session_id))
+            folder = state_dir() / 'backups'
+            folder.mkdir(exist_ok=True)
+            (folder / f'opencode-{session_id}.json').write_text(raw[raw.find('{'):], encoding='utf-8')  # Restore source.
+            self._cli(f'session delete {session_id}', str(HOME))
+        self._import(doc, cwd)  # 1.x import upserts by id, so existing rows stay as they are.
 
 
 class Hermes(Adapter):

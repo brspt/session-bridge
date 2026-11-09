@@ -483,6 +483,7 @@ EN = {
     'tambah': 'add', 'baru': 'new', 'sibuk': 'busy', 'adopsi': 'adopt', 'tetap': 'same', 'lewati': 'skip', 'ekspor': 'export',
     # Adapters
     '{label} baca-saja.': '{label} is read-only.',
+    'opencode: sesi {id} punya sub-sesi, tidak bisa disambung': 'opencode: session {id} has sub-sessions, cannot append',
     '{label} (terdeteksi)': '{label} (detected)',
     'gagal: {error}': 'failed: {error}',
     'Kontrak perekaman Delta tidak didukung.': 'Unsupported Delta recording contract.',
