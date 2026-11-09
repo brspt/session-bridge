@@ -139,12 +139,12 @@ def check_engine(root):
     assert core.export_bundle(a, ['s'], path) == 1
     loaded = core.load_bundle(path)
     transfer = lambda items, dst: core.transfer([(core.BUNDLE, lambda s=s: s) for s in items], dst)
-    assert transfer(loaded, b) == 2 and transfer(loaded, b) == 0 and len(b.store) == 1
+    assert transfer(loaded, b) == (2, 0) and transfer(loaded, b) == (0, 0) and len(b.store) == 1
     assert b.revealed == ['b1', 'b1'], 'every manual move shows its copy, new or already there'
-    assert transfer(loaded, a) == 0 and len(a.store) == 1 and a.revealed == ['s'], 'bundle came home'
+    assert transfer(loaded, a) == (0, 0) and len(a.store) == 1 and a.revealed == ['s'], 'bundle came home'
     a.add('s', 'tambah', 'lagi')
     core.export_bundle(a, ['s'], path)
-    assert transfer(core.load_bundle(path), b) == 2 and len(b.store['b1']) == 4
+    assert transfer(core.load_bundle(path), b) == (2, 0) and len(b.store['b1']) == 4
     path.write_text('{"format": "lain"}', encoding='utf-8')
     with contextlib.suppress(ValueError):
         core.load_bundle(path)
@@ -193,6 +193,20 @@ def check_engine(root):
     assert keep == [('claude', 'codex'), ('delta', 'claude')]
     assert skip(state, {**mirror, 'active': False}, 'codex', 'new', 'delta') == ''
     assert core.effective_routes([('codex', 'delta')], None)[0] == [('codex', 'delta')]
+
+    # Moving a mirrored Delta thread by hand takes its Codex original, once; nothing copied is never "already there".
+    cx, dl, oc = Mem('codex'), Mem('delta'), Mem('opencode')
+    cx.add('cx', 'asli', 'jawab asli')
+    dl.add('dl', 'render', 'render jawab')
+    real_mirror, core.read_mirror = core.read_mirror, lambda: mirror
+    try:
+        move = lambda dst, codex=cx: core.transfer([('delta', lambda: dl.load('dl'))], dst, codex=codex)
+        assert move(oc) == (2, 0) and texts(oc, 'opencode1') == ['asli', 'jawab asli']
+        assert move(oc) == (0, 0) and len(oc.store) == 1 and oc.revealed == ['opencode1', 'opencode1']
+        assert move(cx) == (0, 1) and len(cx.store) == 1, 'the original already lives in Codex'
+        assert move(Mem('hermes'), None) == (0, 1), 'no Codex adapter: skip, never copy the rendered mirror'
+    finally:
+        core.read_mirror = real_mirror
 
     assert core.flat(core.Msg('tool', '', 0, {'name': 'x', 'input': {'b': 1, 'a': 2}, 'output': 'o'})) == \
         core.flat(core.Msg('tool', '', 0, {'name': 'x', 'input': {'a': 2, 'b': 1}, 'output': 'o'}))

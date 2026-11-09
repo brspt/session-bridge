@@ -378,21 +378,27 @@ def sync_all(cfg, adapters, dry=False, log=lambda _: None):
         return results
 
 
-def transfer(sessions, dst, log=lambda _: None):
-    """Manual import/export of chosen sessions. `sessions` yields (src_name, loader) pairs."""
+def transfer(sessions, dst, log=lambda _: None, codex=None):
+    """Manual move of chosen sessions. `sessions` yields (src_name, loader) pairs. Returns (messages, skipped)."""
     with single(wait=30) as free:
         if not free:
             raise RuntimeError('Sinkron lain masih berjalan. Coba lagi sebentar.')
         mirror = read_mirror()
         state = State()
         adopt(state, mirror)
-        total = 0
+        total = skipped = 0
         for src_name, load in sessions:
             try:
                 session = load()
+                original = next((c for c, d in (mirror or {}).get('pairs', ()) if d == session.id), None)
+                if src_name == 'delta' and original and codex and dst.name != 'codex':
+                    # A delta-sync mirror is a rendered copy: move its Codex original, linked to the mirror by adopt().
+                    log(tr('{title}: cermin delta-sync, dipindahkan dari thread Codex aslinya', title=session.title[:60]))
+                    src_name, session = 'codex', codex.load(original)
                 reason = mirror_skip(state, mirror, src_name, session.id, dst.name)
                 if reason:
                     log(f'[{tr("lewati")}] {session.title[:60]}: {reason}')
+                    skipped += 1
                     continue
                 action, count = sync_session(state, session, src_name, dst, force=True)
                 peer = state.peer(group_for(state, session, src_name), dst.name)
@@ -404,7 +410,7 @@ def transfer(sessions, dst, log=lambda _: None):
                 continue
             total += count
             log(f'[{tr(action)} {count}] {session.title[:70]}')
-        return total
+        return total, skipped
 
 
 def export_bundle(src, ids, path, log=lambda _: None):
@@ -462,6 +468,7 @@ EN = {
     'Rute {src}→delta dilewati: {src}→codex lalu delta-sync sudah membawanya.':
         'Route {src}→delta skipped: {src}→codex plus delta-sync already carries it.',
     'thread cermin Codex; Codex→tujuan sudah membawanya': 'Codex mirror thread; Codex→destination already carries it',
+    '{title}: cermin delta-sync, dipindahkan dari thread Codex aslinya': '{title}: delta-sync mirror, moving its Codex original',
     'thread Delta milik delta-sync': 'Delta thread owned by delta-sync',
     'sudah ditangani delta-sync': 'already handled by delta-sync',
     'delta-sync akan membawanya lewat Codex': 'delta-sync will carry it via Codex',
@@ -514,6 +521,7 @@ EN = {
     'Chat dari {src} disalin ke {dst}. Chat asli di {src} tetap ada.': 'Chats from {src} are copied to {dst}. The originals stay in {src}.',
     'Tekan ⇄ untuk arah sebaliknya.': 'Press ⇄ for the other direction.',
     'Selesai: tidak ada pesan baru, sesinya sudah ada di {dst}.': 'Done: nothing new, the sessions are already in {dst}.',
+    'Selesai: tidak ada yang disalin, {k} sesi dilewati (alasannya di atas).': 'Done: nothing copied, {k} sessions skipped (reasons above).',
     'Memuat sesi dari {h}…': 'Loading sessions from {h}…',
     'DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
     'Harness lain dengan folder sendiri muncul otomatis di sini sebagai baca-saja.\n'

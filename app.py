@@ -609,8 +609,9 @@ class App:
             else:
                 src = self.by_label[src_label]
                 pairs = [(src.name, lambda i=i: src.load(i)) for i in picks]
-            work = lambda: core.transfer(pairs, dst, log)
-            finish = lambda n: ((tr('Selesai: {n} pesan disalin.', n=n) if n else
+            work = lambda: core.transfer(pairs, dst, log, self.adapters.get('codex'))
+            finish = lambda r: ((tr('Selesai: {n} pesan disalin.', n=r[0]) if r[0] else
+                                 tr('Selesai: tidak ada yang disalin, {k} sesi dilewati (alasannya di atas).', k=r[1]) if r[1] else
                                  tr('Selesai: tidak ada pesan baru, sesinya sudah ada di {dst}.', dst=dst.label))
                                 + (f'\n{tr(dst.after)}' if dst.after else ''))
         self.go.configure(text=tr('Sedang berjalan…'))
