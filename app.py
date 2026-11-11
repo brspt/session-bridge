@@ -38,7 +38,8 @@ LANGS = {'Indonesia': 'id', 'English': 'en'}
 BUNDLE_LABEL = 'File bundle (.json)'  # Shown through tr(); compare with bundle_label().
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_VALUE = 'SessionBridge'
-DEEPSEEK = ('DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
+DEEPSEEK = ('DeepSeek Harness (~/.dsh) punya baris sendiri di daftar. '
+            'DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
             'Harness lain dengan folder sendiri muncul otomatis di sini sebagai baca-saja.\n'
             'File bundle dan salinan sesi memuat isi chat apa adanya, termasuk rahasia yang pernah tertulis di chat.')
 BG, SIDE, CARD, LINE = '#f5f6f8', '#eceff3', '#ffffff', '#e1e4ea'

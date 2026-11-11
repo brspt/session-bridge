@@ -1,5 +1,6 @@
 """One adapter per harness store. Writes are additive only; credential files and tables are never opened."""
 import contextlib
+import hashlib
 import io
 import json
 import logging
@@ -89,7 +90,7 @@ def title_from(msgs):
 def stream_lines(path):
     """Text lines from a .jsonl or multi-frame .jsonl.zst; tolerates a half-written last line upstream."""
     with open(path, 'rb') as raw:
-        if path.suffix == '.zst':
+        if path.suffix in ('.zst', '.zstd'):
             import zstandard
             source = zstandard.ZstdDecompressor().stream_reader(raw, read_across_frames=True)
         else:
@@ -917,9 +918,242 @@ class Hermes(Adapter):
             self._insert(conn, session_id, msgs)
 
 
+DSH_SAFE = re.compile(r'[A-Za-z0-9._-]')
+
+
+def dsh_escape(ch):
+    data = ch.encode('utf-16-le', 'surrogatepass')  # The harness escapes per UTF-16 code unit.
+    return ''.join(f'~{int.from_bytes(data[i:i + 2], "little"):04X}' for i in range(0, len(data), 2))
+
+
+def dsh_segment(raw):
+    """Port of the harness's encodeSegment: a session id as its folder name."""
+    if raw in ('.', '..'):
+        return raw.replace('.', '~002E')
+    return ''.join(ch if DSH_SAFE.fullmatch(ch) else dsh_escape(ch) for ch in raw)
+
+
+def dsh_project(cwd):
+    """Port of the harness's projectKey: a working folder as its folder name."""
+    out, run = '', False
+    for ch in cwd:
+        sep = ch in '/\\:'
+        if not (sep and run):
+            out += '-' if sep else ch if DSH_SAFE.fullmatch(ch) else dsh_escape(ch)
+        run = sep
+    return '--' + (out.lstrip('-') or 'root')[:251] + '--'
+
+
+def dsh_frame(rows):
+    """One checksummed Zstandard frame of JSONL lines: the unit the harness itself appends."""
+    import zstandard
+    data = ''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in rows).encode()
+    return zstandard.ZstdCompressor(write_checksum=True).compress(data)
+
+
+@contextlib.contextmanager
+def dsh_lease(folder):
+    """The harness's own writer lock: a named kernel semaphore derived from <session folder>/session.lock.
+    Yields False while the app (or its CLI) holds the session; holding it here keeps the app out during a write."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL('kernel32')
+    k32.CreateSemaphoreW.restype = wintypes.HANDLE
+    k32.CreateSemaphoreW.argtypes = (ctypes.c_void_p, wintypes.LONG, wintypes.LONG, wintypes.LPCWSTR)
+    k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    k32.ReleaseSemaphore.argtypes = (wintypes.HANDLE, wintypes.LONG, ctypes.c_void_p)
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    path = os.path.abspath(Path(folder) / 'session.lock').lower()
+    handle = k32.CreateSemaphoreW(None, 1, 1, 'Local\\dsh-session-lock-' + hashlib.sha256(path.encode()).hexdigest())
+    mine = bool(handle) and k32.WaitForSingleObject(handle, 0) == 0
+    try:
+        yield mine
+    finally:
+        if mine:
+            k32.ReleaseSemaphore(handle, 1, None)
+        if handle:
+            k32.CloseHandle(handle)
+
+
+class DeepSeek(Adapter):
+    """DeepSeek Harness: ~/.dsh/sessions/<project>/<session>/session.v4.jsonl.zstd, a header frame plus event frames."""
+    name, label, can_write = 'deepseek', 'DeepSeek Harness', True
+    note = 'Tulis berupa log sesi baru; lolos pemeriksa format aplikasinya, alat jadi teks.'
+    after = 'Mulai ulang DeepSeek Harness bila sedang terbuka; sesinya muncul di daftar sesi, di luar workspace.'
+
+    @property
+    def root(self):
+        return Path(os.environ.get('DSH_HOME') or HOME / '.dsh') / 'sessions'
+
+    def available(self):
+        return self.root.is_dir()
+
+    def location(self):
+        return str(self.root)
+
+    @staticmethod
+    def _ver(path):
+        digits = path.name.split('.')[1][1:]
+        return int(digits) if digits.isdigit() else 0
+
+    def _files(self, session='*'):
+        """Newest log generation per session folder."""
+        found = sorted(self.root.glob(f'*/{session}/session.v*.jsonl.zstd'), key=self._ver)
+        return list({path.parent: path for path in found}.values())
+
+    def _file(self, session_id):
+        return next(iter(self._files(dsh_segment(session_id))), None) if session_id else None
+
+    def _session(self, path):
+        import zstandard
+        rows = []
+        with contextlib.suppress(zstandard.ZstdError):  # A frame the running app is still writing: keep what is whole.
+            rows.extend(json_lines(path))
+        head = rows[0] if rows else {}
+        session = Session(self.name, head.get('id') or '', '', head.get('cwd') or '', epoch(head.get('createdAt')))
+        calls = {}
+        for row in rows[1:]:
+            kind, data, ts = row.get('type'), row.get('data') or {}, epoch(row.get('time'))
+            session.updated = max(session.updated, ts)
+            if kind == 'session/title':
+                session.title = data.get('title') or session.title
+            elif kind == 'tool/call':
+                calls[data.get('callId')] = (data.get('name'), data.get('arguments'))
+            if row.get('surfaceOp') != 'append':  # A replacement is a compacted copy of messages already read.
+                continue
+            msg = data if kind == 'user/message' else data.get('message') or {}
+            source = msg.get('source') or {}
+            texts = [b.get('text') or '' for b in msg.get('content') or [] if isinstance(b, dict) and b.get('type') == 'text']
+            if kind == 'user/message' and source.get('kind') == 'user':  # Other kinds are context the harness injects.
+                session.messages.append(Msg('user', '\n'.join(texts), ts))
+            elif kind == 'assistant/message':
+                session.model = source.get('model') or session.model
+                session.messages += [Msg('assistant', text, ts) for text in texts if text.strip()]
+            elif kind == 'tool/result':
+                name, args = calls.get(msg.get('toolCallId'), ('', None))
+                session.messages.append(Msg('tool', '', ts, {
+                    'name': name, 'input': args, 'output': '\n'.join(texts), 'id': msg.get('toolCallId'),
+                    'status': 'failed' if msg.get('isError') else 'completed'}))
+        return session, head
+
+    def list(self):
+        out = []
+        for path in self._files():
+            session, head = self._session(path)
+            if session.id and session.messages and not head.get('parentSession') and head.get('origin') != 'subagent':
+                stat = path.stat()
+                out.append(Meta(session.id, session.title or title_from(session.messages) or session.id,
+                                session.updated, session.cwd, f'{stat.st_size}:{stat.st_mtime_ns}'))
+        return out
+
+    def load(self, session_id):
+        path = self._file(session_id)
+        if not path:
+            raise KeyError(session_id)
+        session = self._session(path)[0]
+        session.title = session.title or title_from(session.messages)
+        return session
+
+    def _turns(self, msgs, seq, turn, model, head, clock):
+        """Events in the lifecycle the harness's loader checks: per turn one step holding its user messages and
+        one assistant message (a text block per source message). Foreign tool calls travel as text."""
+        rows, turns = [], []
+        for msg in flatten(msgs):
+            if not turns or (msg.role == 'user' and turns[-1][-1].role != 'user'):
+                turns.append([])
+            turns[-1].append(msg)
+
+        def add(kind, data, ts, surface=False):
+            nonlocal clock
+            clock = max(clock, int((ts or time.time()) * 1000))
+            rows.append({'type': kind, 'seq': seq + len(rows), 'time': clock, 'data': data,
+                         **({'surfaceOp': 'append'} if surface else {})})
+
+        for number, group in enumerate(turns, turn):
+            where = {'turn': number, 'step': 1}
+            add('turn/start', {'turn': number}, group[0].ts)
+            add('step/start', dict(where), group[0].ts)
+            if head:  # The harness swaps its real system prompt into this protected first node on the next request.
+                head = False
+                add('system/message', {**where, 'message': {'role': 'system', 'content': [], 'id': str(uuid.uuid4()),
+                                                            'source': {'kind': 'system-prompt'}}}, group[0].ts, True)
+            for msg in group:
+                if msg.role == 'user':
+                    add('user/message', {'content': [{'type': 'text', 'text': msg.text}], 'source': {'kind': 'user'},
+                                         'role': 'user', 'id': str(uuid.uuid4())}, msg.ts, True)
+            replies = [m for m in group if m.role != 'user']
+            if replies:
+                add('assistant/message', {**where, 'message': {
+                    'role': 'assistant', 'content': [{'type': 'text', 'text': m.text} for m in replies],
+                    'source': {'kind': 'model', 'provider': 'session-bridge', 'model': model or 'imported'},
+                    'id': str(uuid.uuid4())}, 'stream': []}, replies[-1].ts, True)
+            add('step/end', dict(where), group[-1].ts)
+            add('turn/end', {'turn': number, 'reason': {'kind': 'completed'}}, group[-1].ts)
+        return rows
+
+    def create(self, session):
+        cwd = os.path.normpath(session.cwd) if session.cwd and os.path.isdir(session.cwd) else ''
+        cwd = cwd if os.path.isabs(cwd) else str(HOME)
+        session_id = 'session-' + str(uuid.uuid4())
+        created = int((session.created or time.time()) * 1000)
+        head = {'type': 'session', 'version': 4, 'id': session_id, 'createdAt': created, 'cwd': cwd, 'isSeeded': False,
+                'delegationDepth': 0, 'agentPreset': 'standard'}
+        # A title with source "user" cites no message, and the harness leaves it alone instead of renaming the chat.
+        title = {'type': 'session/title', 'seq': 0, 'time': created, 'data': {
+            'title': session.title or title_from(session.messages) or 'Sesi', 'messageSeqs': [], 'source': {'kind': 'user'}}}
+        rows = [title] + self._turns(session.messages, 1, 1, session.model, True, created)
+        folder = self.root / dsh_project(cwd) / dsh_segment(session_id)
+        folder.mkdir(parents=True)
+        temp = folder / 'session.tmp'
+        temp.write_bytes(dsh_frame([head]) + dsh_frame(rows))
+        temp.replace(folder / 'session.v4.jsonl.zstd')
+        return session_id
+
+    def append(self, session_id, msgs):
+        path = self._file(session_id)
+        if not path:
+            raise KeyError(session_id)
+        if self._ver(path) != 4:
+            raise RuntimeError(tr('deepseek: sesi {id} masih format lama; buka sekali di DeepSeek Harness', id=session_id))
+        with dsh_lease(path.parent) as mine:
+            if not mine:
+                raise RuntimeError(tr('deepseek: sesi {id} sedang dibuka di DeepSeek Harness; tutup dulu', id=session_id))
+            rows = list(json_lines(path))[1:]  # Raises on a torn tail: never write after one.
+            turns = [r['data']['turn'] for r in rows if r.get('type') == 'turn/start']
+            if len(turns) != sum(r.get('type') == 'turn/end' for r in rows):
+                raise RuntimeError(tr('deepseek: sesi {id} terhenti di tengah giliran, tidak bisa disambung', id=session_id))
+            new = self._turns(msgs, len(rows), max(turns, default=0) + 1, '', not any(r.get('surfaceOp') for r in rows),
+                              max((r.get('time') or 0 for r in rows), default=0))
+            if new:
+                with open(path, 'ab') as out:
+                    out.write(dsh_frame(new))
+
+    def busy(self, session_id):
+        path = self._file(session_id)
+        if not path:
+            return False
+        with dsh_lease(path.parent) as mine:
+            return not mine or recently_touched(path)
+
+
+def pid_alive(pid):
+    import ctypes
+    k32 = ctypes.WinDLL('kernel32')
+    k32.OpenProcess.restype = ctypes.c_void_p
+    handle = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    code = ctypes.c_ulong()
+    k32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+    k32.CloseHandle(ctypes.c_void_p(handle))
+    return code.value == 259  # STILL_ACTIVE
+
+
 class Copilot(Adapter):
-    name, label = 'copilot', 'GitHub Copilot'
-    note = 'Baca-saja: format tulis tak bisa diverifikasi tanpa CLI Copilot.'
+    """Copilot CLI / VS Code agent sessions: ~/.copilot/session-state/<id>/events.jsonl plus workspace.yaml."""
+    name, label, can_write = 'copilot', 'GitHub Copilot', True
+    note = 'Tulis berupa log event baru; lolos pemuat SDK Copilot bawaan VS Code, alat jadi teks.'
+    after = 'Sesinya masuk ke daftar sesi Copilot CLI; muat ulang jendela VS Code bila belum tampak.'
 
     @property
     def root(self):
@@ -938,8 +1172,84 @@ class Copilot(Adapter):
             for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
                 match = re.match(r'^(\w+):\s*(.*)$', line)
                 if match:
-                    out[match[1]] = match[2].strip().strip('"\'')
+                    value = match[2].strip()
+                    with contextlib.suppress(ValueError):  # A double-quoted YAML scalar reads as JSON.
+                        value = json.loads(value) if value.startswith('"') else value
+                    out[match[1]] = str(value).strip('"\'')
         return out
+
+    def _held(self, session_id):
+        """Copilot marks an open session with inuse.<pid>.lock files in its folder."""
+        pids = (path.name.split('.')[1] for path in (self.root / session_id).glob('inuse.*.lock'))
+        return any(pid.isdigit() and pid_alive(pid) for pid in pids)
+
+    def busy(self, session_id):
+        return self._held(session_id) or recently_touched(self.root / session_id / 'events.jsonl')
+
+    @staticmethod
+    def _events(msgs, parent, clock):
+        """Events as Copilot logs a turn. The log is one chain: each event names the one before it."""
+        rows, ask, turn = [], str(uuid.uuid4()), 0
+
+        def add(kind, data, ts):
+            nonlocal parent, clock
+            clock = max(clock + 0.001, ts or time.time())
+            rows.append({'type': kind, 'data': data, 'id': str(uuid.uuid4()), 'timestamp': iso(clock), 'parentId': parent})
+            parent = rows[-1]['id']
+
+        for msg in flatten(msgs):
+            if msg.role == 'user':
+                ask, turn = str(uuid.uuid4()), 0
+                add('user.message', {'content': msg.text, 'transformedContent': msg.text, 'attachments': [],
+                                     'agentMode': 'interactive', 'interactionId': ask}, msg.ts)
+            else:
+                add('assistant.turn_start', {'turnId': str(turn), 'interactionId': ask}, msg.ts)
+                add('assistant.message', {'messageId': str(uuid.uuid4()), 'content': msg.text, 'toolRequests': [],
+                                          'interactionId': ask}, msg.ts)
+                add('assistant.turn_end', {'turnId': str(turn)}, msg.ts)
+                turn += 1
+        return rows
+
+    @staticmethod
+    def _lines(rows):
+        return ''.join(json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n' for row in rows)
+
+    def create(self, session):
+        session_id = str(uuid.uuid4())
+        folder = self.root / session_id
+        cwd = os.path.normpath(session.cwd) if session.cwd and os.path.isdir(session.cwd) else str(HOME)
+        start = session.created or time.time()
+        head = {'type': 'session.start', 'data': {
+            'sessionId': session_id, 'version': 1, 'producer': 'copilot-agent', 'copilotVersion': 'unknown',
+            'startTime': iso(start), 'context': {'cwd': cwd}, 'alreadyInUse': False},
+            'id': str(uuid.uuid4()), 'timestamp': iso(start), 'parentId': None}
+        title = json.dumps(session.title or title_from(session.messages) or 'Sesi', ensure_ascii=False)
+        folder.mkdir(parents=True)
+        (folder / 'workspace.yaml').write_text(
+            f'id: {session_id}\ncwd: {json.dumps(cwd)}\nname: {title}\nuser_named: true\nsummary: {title}\n'
+            f'summary_count: 0\ncreated_at: {iso(start)}\nupdated_at: {iso()}\n', encoding='utf-8')
+        temp = folder / 'events.tmp'  # The folder counts as a session only once events.jsonl exists.
+        temp.write_text(self._lines([head] + self._events(session.messages, head['id'], start)), encoding='utf-8', newline='')
+        temp.replace(folder / 'events.jsonl')
+        return session_id
+
+    def append(self, session_id, msgs):
+        path = self.root / session_id / 'events.jsonl'
+        rows = list(json_lines(path)) if path.exists() else []
+        if not rows:
+            raise KeyError(session_id)
+        if self._held(session_id):
+            raise RuntimeError(tr('copilot: sesi {id} sedang dibuka di Copilot; tutup dulu', id=session_id))
+        new = self._lines(self._events(msgs, rows[-1].get('id'), epoch(rows[-1].get('timestamp'))))
+        with open(path, 'rb+') as out:
+            out.seek(0, os.SEEK_END)
+            out.seek(max(out.tell() - 1, 0))
+            torn = out.read(1) not in (b'\n', b'')  # A cut-off last line must not swallow the next event.
+            out.write((b'\n' if torn else b'') + new.encode('utf-8'))
+        info = self.root / session_id / 'workspace.yaml'
+        with contextlib.suppress(OSError):
+            info.write_text(re.sub(r'(?m)^updated_at:.*$', 'updated_at: ' + iso(),
+                                   info.read_text(encoding='utf-8')), encoding='utf-8')
 
     def list(self):
         out = []
@@ -975,13 +1285,80 @@ class Copilot(Adapter):
         return session
 
 
+def uuid7():
+    """Time-ordered UUID, the id form AionUi gives its projects and folders."""
+    raw = bytearray(int(time.time() * 1000).to_bytes(6, 'big') + os.urandom(10))
+    raw[6], raw[8] = raw[6] & 0x0F | 0x70, raw[8] & 0x3F | 0x80
+    return str(uuid.UUID(bytes=bytes(raw)))
+
+
 class AionUi(Adapter):
-    name, label = 'aionui', 'AionUi'
-    note = 'Baca-saja: baris percakapan butuh konfigurasi agen yang tak bisa diverifikasi tanpa aplikasinya.'
+    name, label, can_write = 'aionui', 'AionUi', True
+    note = ('Tulis berupa percakapan aionrs baru; lolos backend AionUi sendiri. '
+            'Riwayatnya tampil, tetapi agennya tidak otomatis mengingatnya. Alat jadi teks.')
+    after = 'Mulai ulang AionUi bila sedang terbuka; percakapannya muncul di daftar.'
 
     @property
     def db(self):
         return APPDATA / 'AionUi/aionui/aionui-backend.db'
+
+    def busy(self, session_id):
+        with contextlib.closing(ro(self.db)) as conn:
+            return bool(conn.execute("SELECT 1 FROM conversations WHERE id=? AND status='running'", (session_id,)).fetchone())
+
+    @staticmethod
+    def _insert(conn, session_id, msgs, clock):
+        for msg in flatten(msgs):
+            clock = max(clock + 1, int((msg.ts or time.time()) * 1000))  # The app orders by created_at alone.
+            row = uuid.uuid4().hex[:8]
+            conn.execute('''INSERT INTO messages(id, conversation_id, msg_id, type, content, position, status, hidden, created_at)
+                            VALUES(?,?,?,'text',?,?,'finish',0,?)''',
+                         (row, session_id, row, json.dumps({'content': msg.text}, ensure_ascii=False),
+                          'right' if msg.role == 'user' else 'left', clock))
+        conn.execute('UPDATE conversations SET updated_at=? WHERE id=?', (int(time.time() * 1000), session_id))
+
+    def create(self, session):
+        backup_db(self.db, 'aionui')
+        cid, now = uuid.uuid4().hex[:8], int(time.time() * 1000)
+        with contextlib.closing(sqlite3.connect(self.db, timeout=30)) as conn, conn:
+            owner = conn.execute('SELECT user_id FROM conversations ORDER BY updated_at DESC LIMIT 1').fetchone()
+            if not owner:
+                raise RuntimeError(tr('aionui: buat satu percakapan di AionUi dulu, supaya pemiliknya diketahui'))
+            like = conn.execute("SELECT extra, model FROM conversations WHERE type='aionrs' ORDER BY updated_at DESC LIMIT 1").fetchone()
+            extra = json.loads(like[0]) if like else {'skills': [], 'mcp_server_ids': [], 'mcp_servers': [], 'mcp_statuses': []}
+            extra.pop('preset_rules', None)
+            # Always a fresh workspace of AionUi's own: the project is 'temp', so the app may delete the folder with it.
+            work = (self.db.parent / 'conversations/users' / owner[0].removeprefix('user_') / time.strftime('%Y/%m/%d')
+                    / f'aionrs-temp-{cid}')
+            work.mkdir(parents=True, exist_ok=True)
+            extra.update(workspace=str(work), default_files=[])
+            uri = work.as_uri()
+            folder, project = 'folder_' + uuid7(), 'project_' + uuid7()
+            conn.execute('INSERT INTO folders(folder_id, resource_uri, resource_canonical, created_at, updated_at) VALUES(?,?,?,?,?)',
+                         (folder, uri, uri[:10] + uri[10:].lower(), now, now))
+            conn.execute("INSERT INTO projects(project_id, user_id, name, kind, created_at, updated_at) VALUES(?,?,?,'temp',?,?)",
+                         (project, owner[0], work.name, now, now))
+            conn.execute('''INSERT INTO project_explorer(pe_id, project_id, owner_user_id, folder_id, role, order_index,
+                            created_at, updated_at) VALUES(?,?,?,?,'workspace',0,?,?)''',
+                         ('pe_' + uuid7(), project, owner[0], folder, now, now))
+            conn.execute('''INSERT INTO conversations(id, user_id, name, type, extra, model, status, source, created_at,
+                            updated_at, project_id, folder_id) VALUES(?,?,?,'aionrs',?,?,'finished','aionui',?,?,?,?)''',
+                         (cid, owner[0], session.title or title_from(session.messages) or 'Sesi',
+                          json.dumps(extra, ensure_ascii=False), like[1] if like else None, now, now, project, folder))
+            self._insert(conn, cid, session.messages, 0)
+        return cid
+
+    def append(self, session_id, msgs):
+        backup_db(self.db, 'aionui')
+        with contextlib.closing(sqlite3.connect(self.db, timeout=30)) as conn, conn:
+            row = conn.execute('''SELECT c.status, MAX(m.created_at) FROM conversations c
+                                  LEFT JOIN messages m ON m.conversation_id = c.id WHERE c.id=? GROUP BY c.id''',
+                               (session_id,)).fetchone()
+            if not row:
+                raise KeyError(session_id)
+            if row[0] == 'running':
+                raise RuntimeError(tr('aionui: percakapan {id} sedang berjalan di AionUi; tunggu selesai', id=session_id))
+            self._insert(conn, session_id, msgs, row[1] or 0)
 
     def available(self):
         return self.db.exists()
@@ -1137,8 +1514,57 @@ class Zed(Adapter):
 
 
 class Cherry(Adapter):
-    name, label = 'cherry', 'Cherry Studio'
-    note = 'Baca-saja, hanya sesi agen. Chat utamanya tersimpan di IndexedDB dan tidak didukung.'
+    name, label, can_write = 'cherry', 'Cherry Studio', True
+    note = ('Hanya sesi agen; chat utamanya (IndexedDB) tidak didukung. Tulis meniru bentuk baris yang ada, '
+            'belum diperiksa aplikasinya; agennya tidak otomatis mengingat riwayatnya. Alat jadi teks.')
+    after = 'Mulai ulang Cherry Studio bila sedang terbuka; sesinya muncul di bawah agen sesi terakhir.'
+
+    @staticmethod
+    def _insert(conn, session_id, msgs):
+        agent = conn.execute('SELECT agent_id FROM sessions WHERE id=?', (session_id,)).fetchone()
+        if not agent:
+            raise KeyError(session_id)
+        # Cherry resumes the agent's own session from the last non-empty id; new rows must not blank it.
+        last, resume = conn.execute('''SELECT MAX(created_at), (SELECT agent_session_id FROM session_messages
+                                       WHERE session_id=?1 AND COALESCE(agent_session_id, '') != '' ORDER BY id DESC LIMIT 1)
+                                       FROM session_messages WHERE session_id=?1''', (session_id,)).fetchone()
+        clock, ask = int(epoch(last) * 1000), None
+        for msg in flatten(msgs):
+            clock = max(clock + 1, int((msg.ts or time.time()) * 1000))  # Rows are read back in created_at order.
+            stamp, mid, block = iso(clock / 1000), str(uuid.uuid4()), str(uuid.uuid4())
+            message = {'id': mid, 'role': msg.role, 'assistantId': agent[0], 'topicId': f'agent-session:{session_id}',
+                       'createdAt': stamp, 'status': 'success', 'blocks': [block], 'agentSessionId': resume or ''}
+            if msg.role == 'user':
+                ask = mid
+            elif ask:
+                message['askId'] = ask
+            body = {'message': message, 'blocks': [{'id': block, 'messageId': mid, 'type': 'main_text', 'createdAt': stamp,
+                                                    'status': 'success', 'content': msg.text}]}
+            conn.execute('''INSERT INTO session_messages(session_id, role, content, created_at, updated_at, agent_session_id)
+                            VALUES(?,?,?,?,?,?)''',
+                         (session_id, msg.role, json.dumps(body, ensure_ascii=False), stamp, stamp, resume or ''))
+        conn.execute('UPDATE sessions SET updated_at=? WHERE id=?', (iso(), session_id))
+
+    def create(self, session):
+        backup_db(self.db, 'cherry')
+        with contextlib.closing(sqlite3.connect(self.db, timeout=30)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            like = conn.execute('''SELECT s.* FROM sessions s JOIN agents a ON a.id = s.agent_id
+                                   ORDER BY s.updated_at DESC LIMIT 1''').fetchone()
+            if not like:  # A session is a copy of its agent's setup; without one there is nothing to copy from.
+                raise RuntimeError(tr('cherry: buat satu sesi agen di Cherry Studio dulu, supaya ada agen untuk ditumpangi'))
+            row = dict(like)
+            tail = ''.join(random.choices(string.ascii_lowercase + string.digits, k=9))
+            row.update(id=f'session_{int(time.time() * 1000)}_{tail}', description=None, created_at=iso(), updated_at=iso(),
+                       name=session.title or title_from(session.messages) or 'Sesi')
+            conn.execute(f'INSERT INTO sessions({", ".join(row)}) VALUES({", ".join("?" * len(row))})', list(row.values()))
+            self._insert(conn, row['id'], session.messages)
+        return row['id']
+
+    def append(self, session_id, msgs):
+        backup_db(self.db, 'cherry')
+        with contextlib.closing(sqlite3.connect(self.db, timeout=30)) as conn, conn:
+            self._insert(conn, session_id, msgs)
 
     @property
     def db(self):
@@ -1248,6 +1674,7 @@ class GenericSqlite(Adapter):
 FOLDERS = {'sessions', 'conversations', 'chats', 'threads', 'session-state', 'tasks', 'history'}
 NOISE = {'.cache', '.npm', '.nuget', '.gradle', '.android', '.vscode', '.cargo', '.rustup', '.pyenv', '.conda', '.docker',
          '.ssh', '.git', '.local', '.config', '.claude', '.codex', '.hermes', '.copilot', '.gemini', '.session-bridge',
+         '.dsh', '@deepseek-ai',
          '.ollama', '.gnupg', '.aws', '.azure', '.kube', '.m2', '.ipython', '.jupyter', '.matplotlib', '.dotnet',
          'code', 'code - insiders', 'cursor', 'google', 'microsoft', 'mozilla', 'packages', 'npm', 'npm-cache', 'pip',
          'temp', 'programs', 'node_modules', 'aionui', 'cherrystudio', 'zed', 'delta', 'openai', 'opencode', 'claude',
@@ -1349,7 +1776,8 @@ def _session_files(folder):
 
 
 def registry(scan=True):
-    known = [Claude(), Codex(), Delta(), OpenCode(), Hermes(), Copilot(), AionUi(), Antigravity(), Zed(), Cherry()]
+    known = [Claude(), Codex(), Delta(), OpenCode(), Hermes(), DeepSeek(), Copilot(), AionUi(), Antigravity(), Zed(),
+             Cherry()]
     found = [a for a in known if a.available()]
     if scan:
         with contextlib.suppress(Exception):  # A scan problem must never block the known harnesses.

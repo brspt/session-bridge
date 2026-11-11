@@ -43,16 +43,24 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 | Delta | ya | ya | Lewat CLI resmi, thread selalu privat |
 | OpenCode | ya | ya | Lewat CLI aplikasi desktop OpenCode 2.x (`session import`, tabel `session_v2`); 1.x lewat `opencode import` |
 | Hermes | ya | ya | Backup DB sebelum menulis (satu per hari, simpan 7) |
-| Copilot CLI | ya | tidak | CLI tidak bisa dijalankan di sini, jadi hasil tulis tak bisa diverifikasi |
-| AionUi | ya | tidak | Percakapan menyimpan konfigurasi agen yang tak bisa disusun dari luar |
-| Antigravity | ya | tidak | Isi percakapan protobuf, hanya ringkasan terbaca |
+| DeepSeek Harness | ya | ya | Log sesi `~/.dsh` (frame zstd). Hasil tulis lolos pemuat aplikasinya sendiri; sesi yang sedang dibuka tidak disentuh |
+| Copilot CLI | ya | ya | Log event `~/.copilot/session-state`. Hasil tulis lolos pemuat SDK Copilot bawaan VS Code |
+| AionUi | ya | ya | Percakapan `aionrs` baru dengan workspace sendiri; lolos backend AionUi. Backup DB sebelum menulis |
+| Cherry Studio | sebagian | ya, belum teruji aplikasinya | Hanya sesi agen di `agents.db` (chat utama ada di IndexedDB). Tulis meniru bentuk baris yang ada. Backup DB sebelum menulis |
+| Antigravity | ya | tidak | Isi percakapan protobuf tanpa skema, hanya indeks teks terbaca |
 | Zed | ya | tidak | Belum ada thread nyata untuk diuji |
-| Cherry Studio | sebagian | tidak | Hanya `agents.db`; chat utama ada di IndexedDB |
-| Lainnya | ya | tidak | Folder/SQLite mirip sesi dideteksi otomatis, label `(terdeteksi)` |
+| Lainnya | ya | tidak | Folder/SQLite mirip sesi dideteksi otomatis, label `(terdeteksi)`; formatnya tebakan, jadi tidak ditulis |
 
-**DeepSeek.** Tidak ada harness DeepSeek sendiri di perangkat ini. Sesi DeepSeek ada di Claude Code
-(profil `~/.claude/profiles`) dan OpenCode, jadi ikut lewat dua harness itu. Kalau nanti ada folder
-sesi seperti `~/.deepseek`, detektor umum mengambilnya sebagai baca-saja.
+Batas tulis yang perlu diketahui:
+
+- Panggilan tool hanya jadi blok tool asli di Claude Code. Di harness lain ia masuk sebagai teks.
+- AionUi dan Cherry Studio menampilkan riwayat yang disalin, tetapi agennya tidak otomatis mengingatnya:
+  sesi agen di balik percakapan itu mulai kosong.
+- Penulis Cherry Studio belum pernah diperiksa oleh aplikasinya (aplikasi tidak terpasang saat dibuat).
+  Coba dulu dengan satu sesi dan lihat hasilnya di Cherry Studio.
+
+**DeepSeek.** DeepSeek Harness (`~/.dsh`) punya adaptor sendiri. Sesi DeepSeek yang dijalankan lewat
+Claude Code (profil `~/.claude/profiles`) atau OpenCode tersimpan di dua harness itu, jadi ikut lewat sana.
 
 ## Cara kerja sinkron
 

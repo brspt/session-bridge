@@ -497,13 +497,38 @@ EN = {
     'Tulis lewat `opencode import` (upsert resmi). Termasuk sesi model DeepSeek lewat OpenCode.':
         'Writes through `opencode import` (official upsert). Includes DeepSeek model sessions run through OpenCode.',
     'Tulis berupa baris baru di state.db; database dicadangkan dulu.': 'Writes new rows to state.db; the database is backed up first.',
-    'Baca-saja: format tulis tak bisa diverifikasi tanpa CLI Copilot.': 'Read-only: the write format cannot be verified without the Copilot CLI.',
-    'Baca-saja: baris percakapan butuh konfigurasi agen yang tak bisa diverifikasi tanpa aplikasinya.':
-        'Read-only: conversation rows need an agent configuration that cannot be verified without the app.',
+    'Tulis berupa log sesi baru; lolos pemeriksa format aplikasinya, alat jadi teks.':
+        'Writes a new session log; passes the app\'s own format check, tools become text.',
+    'Mulai ulang DeepSeek Harness bila sedang terbuka; sesinya muncul di daftar sesi, di luar workspace.':
+        'Restart DeepSeek Harness if it is open; the session shows up in the session list, outside the workspaces.',
+    'deepseek: sesi {id} masih format lama; buka sekali di DeepSeek Harness':
+        'deepseek: session {id} is still in the old format; open it once in DeepSeek Harness',
+    'deepseek: sesi {id} sedang dibuka di DeepSeek Harness; tutup dulu': 'deepseek: session {id} is open in DeepSeek Harness; close it first',
+    'deepseek: sesi {id} terhenti di tengah giliran, tidak bisa disambung': 'deepseek: session {id} stopped mid-turn, cannot append',
+    'Tulis berupa log event baru; lolos pemuat SDK Copilot bawaan VS Code, alat jadi teks.':
+        'Writes a new event log; passes the Copilot SDK loader bundled with VS Code, tools become text.',
+    'Sesinya masuk ke daftar sesi Copilot CLI; muat ulang jendela VS Code bila belum tampak.':
+        'The session joins the Copilot CLI session list; reload the VS Code window if it does not show yet.',
+    'copilot: sesi {id} sedang dibuka di Copilot; tutup dulu': 'copilot: session {id} is open in Copilot; close it first',
+    'Tulis berupa percakapan aionrs baru; lolos backend AionUi sendiri. '
+    'Riwayatnya tampil, tetapi agennya tidak otomatis mengingatnya. Alat jadi teks.':
+        'Writes a new aionrs conversation; passes AionUi\'s own backend. '
+        'The history is shown, but the agent does not remember it by itself. Tools become text.',
+    'Mulai ulang AionUi bila sedang terbuka; percakapannya muncul di daftar.':
+        'Restart AionUi if it is open; the conversation shows up in the list.',
+    'aionui: buat satu percakapan di AionUi dulu, supaya pemiliknya diketahui':
+        'aionui: create one conversation in AionUi first, so its owner is known',
+    'aionui: percakapan {id} sedang berjalan di AionUi; tunggu selesai': 'aionui: conversation {id} is running in AionUi; wait for it to finish',
     'Baca-saja lewat indeks teks; langkah aslinya protobuf tanpa skema.': 'Read-only through the text index; the real steps are schemaless protobuf.',
     'Baca-saja, belum diverifikasi: perangkat ini belum punya thread Zed.': 'Read-only, unverified: this device has no Zed threads yet.',
-    'Baca-saja, hanya sesi agen. Chat utamanya tersimpan di IndexedDB dan tidak didukung.':
-        'Read-only, agent sessions only. The main chats live in IndexedDB, which is not supported.',
+    'Hanya sesi agen; chat utamanya (IndexedDB) tidak didukung. Tulis meniru bentuk baris yang ada, '
+    'belum diperiksa aplikasinya; agennya tidak otomatis mengingat riwayatnya. Alat jadi teks.':
+        'Agent sessions only; the main chats (IndexedDB) are not supported. Writes copy the shape of existing rows, '
+        'not yet checked by the app; the agent does not remember the history by itself. Tools become text.',
+    'Mulai ulang Cherry Studio bila sedang terbuka; sesinya muncul di bawah agen sesi terakhir.':
+        'Restart Cherry Studio if it is open; the session shows up under the agent of the latest session.',
+    'cherry: buat satu sesi agen di Cherry Studio dulu, supaya ada agen untuk ditumpangi':
+        'cherry: create one agent session in Cherry Studio first, so there is an agent to attach to',
     'Baca-saja, terdeteksi otomatis. Format ditebak dari isi file.': 'Read-only, detected automatically. Format guessed from file contents.',
     'Baca-saja, terdeteksi otomatis. Format ditebak dari skema tabel.': 'Read-only, detected automatically. Format guessed from the table schema.',
     # Window
@@ -524,9 +549,11 @@ EN = {
     'Selesai: tidak ada pesan baru, sesinya sudah ada di {dst}.': 'Done: nothing new, the sessions are already in {dst}.',
     'Selesai: tidak ada yang disalin, {k} sesi dilewati (alasannya di atas).': 'Done: nothing copied, {k} sessions skipped (reasons above).',
     'Memuat sesi dari {h}…': 'Loading sessions from {h}…',
+    'DeepSeek Harness (~/.dsh) punya baris sendiri di daftar. '
     'DeepSeek lewat Claude Code atau OpenCode tersimpan di store harness itu, jadi ikut terbawa. '
     'Harness lain dengan folder sendiri muncul otomatis di sini sebagai baca-saja.\n'
     'File bundle dan salinan sesi memuat isi chat apa adanya, termasuk rahasia yang pernah tertulis di chat.':
+        'DeepSeek Harness (~/.dsh) has its own row in the list. '
         'DeepSeek through Claude Code or OpenCode is stored in that harness, so it comes along. '
         'Other harnesses with their own folder show up here automatically as read-only.\n'
         'Bundle files and session copies hold the chats as they are, including any secret ever written in a chat.',

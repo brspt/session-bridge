@@ -233,7 +233,7 @@ def check_files(root):
     import zstandard
     box = fresh(root, 'files')
     os.environ.update(CLAUDE_CONFIG_DIR=str(box / 'claude'), CODEX_HOME=str(box / 'codex'),
-                      HERMES_HOME=str(box / 'hermes'), COPILOT_HOME=str(box / 'copilot'))
+                      HERMES_HOME=str(box / 'hermes'), COPILOT_HOME=str(box / 'copilot'), DSH_HOME=str(box / 'dsh'))
     claude, codex, hermes, copilot = A.Claude(), A.Codex(), A.Hermes(), A.Copilot()
 
     sid = '11111111-2222-3333-4444-555555555555'
@@ -342,7 +342,7 @@ def check_files(root):
     assert core.digests([back[1]]) == core.digests([patch]), 'raw-string tool input round-trips'
     claude._file(new).unlink()
 
-    # Read-only stores.
+    # A Copilot log as the CLI writes it, tools included.
     folder = box / 'copilot/session-state/abc'
     folder.mkdir(parents=True)
     (folder / 'workspace.yaml').write_text('name: Sesi Copilot\ncwd: D:\\proj\n')
@@ -351,8 +351,154 @@ def check_files(root):
         {'type': 'tool.execution_start', 'data': {'toolCallId': 't', 'toolName': 'ls', 'arguments': {}}},
         {'type': 'tool.execution_complete', 'data': {'toolCallId': 't', 'result': {'content': 'hasil'}}},
         {'type': 'assistant.message', 'data': {'content': 'halo'}}])) + '\n')
-    assert copilot.list()[0].title == 'Sesi Copilot' and not copilot.can_write
+    assert copilot.list()[0].title == 'Sesi Copilot'
     assert [m.role for m in copilot.load('abc').messages] == ['user', 'tool', 'assistant']
+
+    # The other writers: what goes in comes back, in order, and an append only adds.
+    talk = [core.Msg('user', 'hai', 10), core.Msg('assistant', 'halo\nbaris dua', 11),
+            core.Msg('tool', '', 12, {'name': 'Bash', 'input': {'command': 'ls'}, 'output': 'a.txt'}),
+            core.Msg('user', 'tanya "dua" \\ é 😀', 12), core.Msg('assistant', 'jawab dua', 12)]
+    more = [core.Msg('user', 'lanjutan tiga'), core.Msg('assistant', 'jawab tiga')]
+
+    def round_trip(adapter):
+        new = adapter.create(core.Session('claude', 'src', 'Judul Tulis', cwd=str(box), messages=talk))
+        assert adapter.has(new) and next(m for m in adapter.list() if m.id == new).title == 'Judul Tulis', adapter.name
+        assert core.digests(adapter.load(new).messages) == core.digests(core.flatten(talk)), adapter.name
+        adapter.append(new, more)
+        assert core.digests(adapter.load(new).messages) == core.digests(core.flatten(talk + more)), adapter.name
+        return new
+
+    def refuses(call, *args):
+        with contextlib.suppress(RuntimeError):
+            call(*args)
+            raise AssertionError('write accepted')
+
+    # DeepSeek Harness: frames of a zstd log; sequence and turn lifecycle stay whole across an append.
+    assert A.dsh_project('C:\\Users\\Nama Orang\\Documents\\proyek-satu') == '--C-Users-Nama~0020Orang-Documents-proyek-satu--'
+    deepseek = A.DeepSeek()
+    new = round_trip(deepseek)
+    log = box / 'dsh/sessions' / A.dsh_project(str(box)) / new / 'session.v4.jsonl.zstd'
+    rows = list(A.json_lines(log))
+    kinds = [r['type'] for r in rows[1:]]
+    assert rows[0]['id'] == new and [r['seq'] for r in rows[1:]] == list(range(len(rows) - 1))
+    assert kinds.count('turn/start') == kinds.count('turn/end') == 3 and kinds.count('system/message') == 1
+    with A.dsh_lease(log.parent) as mine:  # The app's own writer lock: held means hands off.
+        assert mine and deepseek.busy(new)
+        refuses(deepseek.append, new, more)
+    assert len(list(A.json_lines(log))) == len(rows)
+
+    # Copilot: one parent chain from session.start to the last event; an open session is left alone.
+    new = round_trip(copilot)
+    rows = list(A.json_lines(box / 'copilot/session-state' / new / 'events.jsonl'))
+    assert rows[0]['type'] == 'session.start' and rows[0]['parentId'] is None
+    assert all(r['parentId'] == p['id'] for p, r in zip(rows, rows[1:])), 'unbroken parent chain'
+    lock = box / 'copilot/session-state' / new / f'inuse.{os.getpid()}.lock'
+    lock.write_text('')
+    assert copilot.busy(new)
+    refuses(copilot.append, new, more)
+    lock.unlink()
+
+    # AionUi: the tables of its real schema. A conversation needs an owner and its own project, folder and workspace.
+    class Aion(A.AionUi):
+        db = box / 'aion/aionui-backend.db'
+
+    (box / 'aion').mkdir()
+    conn = sqlite3.connect(Aion.db)
+    conn.executescript('''
+        CREATE TABLE conversations(id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
+            extra TEXT NOT NULL DEFAULT '{}', model TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'running', 'finished')), source TEXT,
+            channel_chat_id TEXT, pinned INTEGER NOT NULL DEFAULT 0, pinned_at INTEGER, created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL, project_id TEXT, folder_id TEXT, name_source TEXT, archived_at INTEGER);
+        CREATE TABLE messages(id TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, msg_id TEXT, type TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '{}', position TEXT CHECK(position IN ('left', 'right', 'center', 'pop')),
+            status TEXT CHECK(status IN ('finish', 'pending', 'error', 'work')), hidden INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, backend_turn_id TEXT);
+        CREATE TABLE projects(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL UNIQUE,
+            user_id TEXT NOT NULL DEFAULT 'system_default_user', name TEXT NOT NULL, kind TEXT NOT NULL,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE folders(id INTEGER PRIMARY KEY AUTOINCREMENT, folder_id TEXT NOT NULL UNIQUE, resource_uri TEXT NOT NULL,
+            resource_canonical TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE project_explorer(id INTEGER PRIMARY KEY AUTOINCREMENT, pe_id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL,
+            owner_user_id TEXT NOT NULL DEFAULT 'system_default_user', folder_id TEXT NOT NULL, role TEXT NOT NULL,
+            display_name TEXT, order_index INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            UNIQUE(project_id, folder_id));''')
+    conn.close()
+    aion = Aion()
+    refuses(aion.create, core.Session('claude', 'src', 'Tanpa pemilik', messages=talk))
+    with contextlib.closing(sqlite3.connect(Aion.db)) as conn, conn:
+        conn.execute('''INSERT INTO conversations(id, user_id, name, type, extra, model, status, created_at, updated_at)
+                        VALUES('tmpl', 'user_abc', 'templat', 'aionrs', ?, 'model-x', 'finished', 1, 1)''',
+                     (json.dumps({'skills': ['s'], 'preset_rules': 'aturan', 'workspace': 'D:/lama'}),))
+    new = round_trip(aion)
+    with contextlib.closing(sqlite3.connect(Aion.db)) as conn, conn:
+        conv = conn.execute('SELECT user_id, type, model, status, extra, project_id, folder_id FROM conversations WHERE id=?',
+                            (new,)).fetchone()
+        extra, work = json.loads(conv[4]), Path(json.loads(conv[4])['workspace'])
+        assert conv[:4] == ('user_abc', 'aionrs', 'model-x', 'finished') and extra['skills'] == ['s'] and 'preset_rules' not in extra
+        assert work.is_dir() and (box / 'aion/conversations/users/abc') in work.parents, 'a workspace of its own, never the source cwd'
+        assert conn.execute('''SELECT p.kind, e.role, f.resource_uri FROM project_explorer e
+                               JOIN projects p ON p.project_id = e.project_id JOIN folders f ON f.folder_id = e.folder_id
+                               WHERE e.project_id=? AND e.folder_id=?''', conv[5:]).fetchall() == [('temp', 'workspace', work.as_uri())]
+        sent = conn.execute('SELECT position, status, id = msg_id, created_at FROM messages WHERE conversation_id=? ORDER BY created_at',
+                            (new,)).fetchall()
+        assert [r[0] for r in sent] == ['right', 'left', 'left', 'right', 'left', 'right', 'left']
+        assert all(r[1] == 'finish' and r[2] for r in sent) and len({r[3] for r in sent}) == 7, 'equal timestamps still order'
+        conn.execute("UPDATE conversations SET status='running' WHERE id=?", (new,))
+    assert aion.busy(new)
+    refuses(aion.append, new, more)
+    assert list((box / 'state/backups').glob('aionui-*.sqlite')), 'backup before first write'
+
+    # Cherry Studio: a session borrows the setup of the newest agent session; message and block ids point at each other.
+    class Cher(A.Cherry):
+        db = box / 'cherry/agents.db'
+
+    (box / 'cherry').mkdir()
+    conn = sqlite3.connect(Cher.db)
+    conn.executescript('''
+        CREATE TABLE agents(id text PRIMARY KEY NOT NULL, type text NOT NULL, name text NOT NULL, description text,
+            accessible_paths text, instructions text, model text NOT NULL, plan_model text, small_model text, mcps text,
+            allowed_tools text, configuration text, created_at text NOT NULL, updated_at text NOT NULL,
+            sort_order integer DEFAULT 0 NOT NULL, deleted_at text);
+        CREATE TABLE sessions(id text PRIMARY KEY NOT NULL, agent_type text NOT NULL, agent_id text NOT NULL, name text NOT NULL,
+            description text, accessible_paths text, instructions text, model text NOT NULL, plan_model text, small_model text,
+            mcps text, allowed_tools text, configuration text, created_at text NOT NULL, updated_at text NOT NULL,
+            slash_commands text, sort_order integer DEFAULT 0 NOT NULL);
+        CREATE TABLE session_messages(id integer PRIMARY KEY AUTOINCREMENT NOT NULL, session_id text NOT NULL, role text NOT NULL,
+            content text NOT NULL, metadata text, created_at text NOT NULL, updated_at text NOT NULL,
+            agent_session_id text DEFAULT '');''')
+    conn.close()
+    cherry = Cher()
+    refuses(cherry.create, core.Session('claude', 'src', 'Tanpa agen', messages=talk))
+    stamp = '2026-01-01T00:00:00.000Z'
+    with contextlib.closing(sqlite3.connect(Cher.db)) as conn, conn:
+        conn.execute("INSERT INTO agents(id, type, name, model, created_at, updated_at) VALUES('agent_1', 'claude-code', 'Agen', 'p:m', ?, ?)",
+                     (stamp, stamp))
+        conn.execute('''INSERT INTO sessions(id, agent_type, agent_id, name, description, accessible_paths, model, created_at, updated_at)
+                        VALUES('lama', 'claude-code', 'agent_1', 'Sesi lama', 'catatan', '["D:/proj"]', 'p:m', ?, ?)''', (stamp, stamp))
+        conn.execute('''INSERT INTO session_messages(session_id, role, content, created_at, updated_at, agent_session_id)
+                        VALUES('lama', 'user', ?, ?, ?, 'sdk-1')''',
+                     (json.dumps({'message': {'id': 'm0', 'role': 'user'}, 'blocks': [{'type': 'main_text', 'content': 'awal'}]}), stamp, stamp))
+    new = round_trip(cherry)
+    assert re.fullmatch(r'session_\d{13}_[a-z0-9]{9}', new), new
+    cherry.append('lama', more)
+    assert texts(cherry, 'lama') == ['awal', 'lanjutan tiga', 'jawab tiga']
+    with contextlib.closing(sqlite3.connect(Cher.db)) as conn, conn:
+        assert conn.execute('SELECT agent_type, agent_id, accessible_paths, model, description FROM sessions WHERE id=?',
+                            (new,)).fetchone() == ('claude-code', 'agent_1', '["D:/proj"]', 'p:m', None)
+        sent = conn.execute('SELECT role, content, created_at, agent_session_id FROM session_messages WHERE session_id=? ORDER BY id',
+                            (new,)).fetchall()
+        bodies = [json.loads(r[1]) for r in sent]
+        assert [r[2] for r in sent] == sorted({r[2] for r in sent}) and {r[3] for r in sent} == {''}, 'rising stamps, no borrowed resume id'
+        for row, body in zip(sent, bodies):
+            message, (block,) = body['message'], body['blocks']
+            assert (message['role'], message['assistantId'], message['topicId']) == (row[0], 'agent_1', f'agent-session:{new}')
+            assert message['blocks'] == [block['id']] and block['messageId'] == message['id'] and message['createdAt'] == row[2]
+        assert [b['message'].get('askId') for b in bodies] == [None] + [bodies[0]['message']['id']] * 2 + [None] + \
+            [bodies[3]['message']['id']] + [None] + [bodies[5]['message']['id']]
+        kept = conn.execute("SELECT agent_session_id, content FROM session_messages WHERE session_id='lama' ORDER BY id").fetchall()
+        assert [r[0] for r in kept] == ['sdk-1'] * 3 and json.loads(kept[2][1])['message']['agentSessionId'] == 'sdk-1', 'resume id survives'
+    assert list((box / 'state/backups').glob('cherry-*.sqlite')), 'backup before first write'
 
     # Generic reader: messages found, credential-named files never listed.
     gen = box / 'gen'
