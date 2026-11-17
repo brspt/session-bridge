@@ -127,8 +127,24 @@ def check_engine(root):
     a.store['s'] = [core.Msg('user', 'run', time.time() - 900),
                     core.Msg('tool', '', time.time() - 900, {'name': 'ls', 'input': {'b': 1, 'a': 2}, 'output': 'x' * 20000})]
     core.sync_route(state, a, b, 0, None)
-    assert 'dipotong session-bridge' in texts(b, 'b1')[1] and len(texts(b, 'b1')[1]) < 16100
+    assert 'dipotong session-bridge' in texts(b, 'b1')[1] and len(texts(b, 'b1')[1]) < 2 * core.TOOL_KEEP + 40
     assert core.sync_route(state, b, a, 0, None) == [], 'flat tool copy must digest like the tool block'
+
+    # A huge history is cut to the budget, marked, never re-sent; a deleted copy comes back on a manual move.
+    fresh(root, 'budget')
+    a, b = Mem('a'), Mem('b')
+    state = core.State()
+    big = 'y' * (core.HISTORY_CAP // 10)
+    a.store['s'] = [core.Msg('tool', '', time.time() - 900, {'name': 'x', 'input': 'z', 'output': big})] * 30
+    a.add('s', *[big] * 20, ':codex-file-citation{path="a.py" line=1} terakhir', age=900)
+    core.sync_route(state, a, b, 0, None)
+    got = texts(b, 'b1')
+    assert got[0].startswith('[session-bridge] 30 jejak alat dan 11 pesan lama') and got[-1] == '`a.py` terakhir'
+    assert sum(map(len, got)) < core.HISTORY_CAP + 300, 'budget ignored'
+    a.add('s', 'baru', 'balas', age=900)
+    assert core.sync_route(state, a, b, 0, None)[0][5] == 2 and len(b.store['b1']) == len(got) + 2, 'dropped re-sent'
+    del b.store['b1']
+    assert core.transfer([('a', lambda: a.load('s'))], b)[0] > 0 and b.store['b2'], 'deleted copy not remade'
 
     # Bundles: re-import dedupes, and returning home links instead of duplicating.
     fresh(root, 'bundle')
@@ -499,6 +515,26 @@ def check_files(root):
         kept = conn.execute("SELECT agent_session_id, content FROM session_messages WHERE session_id='lama' ORDER BY id").fetchall()
         assert [r[0] for r in kept] == ['sdk-1'] * 3 and json.loads(kept[2][1])['message']['agentSessionId'] == 'sdk-1', 'resume id survives'
     assert list((box / 'state/backups').glob('cherry-*.sqlite')), 'backup before first write'
+
+    # Antigravity: one SQLite per conversation, protobuf steps; tool results pair with the calls in order.
+    class Agy(A.Antigravity):
+        root = box / 'agy'
+
+    (box / 'agy/conversations').mkdir(parents=True)
+    agy = Agy()
+    new = round_trip(agy)
+    odd = agy.create(core.Session('claude', 'src', 'kutip "dua" \\ é', messages=more))
+    assert next(m for m in agy.list() if m.id == odd).title == 'kutip "dua" \\ é'
+    with contextlib.closing(sqlite3.connect(Agy.root / f'conversations/{new}.db')) as conn, conn:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 1
+        calls = A.pb((1, 'jawab'), (7, A.pb((1, 'c1'), (2, 'run'), (3, '{"cmd":"ls"}'))), (7, A.pb((1, 'c2'), (2, 'view'), (3, '{}'))))
+        result = [(140, A.pb((2, A.pb((1, out))))) for out in ('out1', 'out2')]
+        for idx, kind, body in ((90, 15, (20, calls)), (91, 132, result[0]), (92, 132, result[1])):
+            conn.execute('INSERT INTO steps(idx, step_type, metadata, step_payload) VALUES(?,?,?,?)', (idx, kind, b'', A.pb(body)))
+    tail = agy.load(new).messages[-3:]
+    assert [(m.role, (m.tool or {}).get('name'), (m.tool or {}).get('output')) for m in tail] == \
+        [('assistant', None, None), ('tool', 'run', 'out1'), ('tool', 'view', 'out2')]
+    assert list((box / 'state/backups').glob('antigravity-*.sqlite')) and A.pb_read(b'\x0a\x05ab') == [], 'backup; bad bytes'
 
     # Generic reader: messages found, credential-named files never listed.
     gen = box / 'gen'

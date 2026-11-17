@@ -4,7 +4,7 @@ Satu EXE untuk memindahkan dan sinkron otomatis chat antar harness AI di Windows
 Jalankan `SessionBridge.exe`. Tidak perlu instal apa pun, tapi harness tujuan harus sudah terpasang.
 
 > **English:** one Windows EXE to move and auto-sync chat sessions between Claude Code, Codex, Delta,
-> OpenCode, Hermes and other detected AI harnesses. Download `SessionBridge.exe` from Releases and run it.
+> OpenCode, Hermes, DeepSeek Harness, Copilot CLI, AionUi, Cherry Studio, Antigravity and other detected AI harnesses. Download `SessionBridge.exe` from Releases and run it.
 > Switch the window to English with **Bahasa → English** at the bottom left.
 
 ## Halaman
@@ -47,13 +47,15 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 | Copilot CLI | ya | ya | Log event `~/.copilot/session-state`. Hasil tulis lolos pemuat SDK Copilot bawaan VS Code |
 | AionUi | ya | ya | Percakapan `aionrs` baru dengan workspace sendiri; lolos backend AionUi. Backup DB sebelum menulis |
 | Cherry Studio | sebagian | ya, belum teruji aplikasinya | Hanya sesi agen di `agents.db` (chat utama ada di IndexedDB). Tulis meniru bentuk baris yang ada. Backup DB sebelum menulis |
-| Antigravity | ya | tidak | Isi percakapan protobuf tanpa skema, hanya indeks teks terbaca |
+| Antigravity | ya | ya | Satu SQLite per percakapan (`~/.gemini/antigravity/conversations`), langkah protobuf. Hasil tulis lolos language server Antigravity. Backup sebelum menambah. Mulai ulang Antigravity bila sedang terbuka |
 | Zed | ya | tidak | Belum ada thread nyata untuk diuji |
 | Lainnya | ya | tidak | Folder/SQLite mirip sesi dideteksi otomatis, label `(terdeteksi)`; formatnya tebakan, jadi tidak ditulis |
 
 Batas tulis yang perlu diketahui:
 
 - Panggilan tool hanya jadi blok tool asli di Claude Code. Di harness lain ia masuk sebagai teks.
+- Antigravity yang sedang terbuka menyimpan percakapan yang dimuat di memori. Pesan tambahan baru tampil
+  setelah Antigravity dimulai ulang; jangan lanjutkan percakapan itu di Antigravity sebelum dimulai ulang.
 - AionUi dan Cherry Studio menampilkan riwayat yang disalin, tetapi agennya tidak otomatis mengingatnya:
   sesi agen di balik percakapan itu mulai kosong.
 - Penulis Cherry Studio belum pernah diperiksa oleh aplikasinya (aplikasi tidak terpasang saat dibuat).
@@ -85,7 +87,10 @@ Cermin Codex → Delta lama (`~/.codex/integrations/delta-sync`) tidak disentuh.
 - Balasan yang diketik di thread Delta hasil cermin tidak ikut, delta-sync satu arah.
 - Menambah pesan ke thread Delta yang bukan buatan Session Bridge belum teruji. Kalau ditolak Delta, hasilnya
   baris `GAGAL` di log dan tidak ada data berubah.
-- Output tool dipotong 8000 karakter saat ditulis ke harness lain supaya resume tidak berat. Bundle menyimpan utuh.
+- Salinan ke harness lain dibuat muat di konteks model: input/output tool diringkas 400 karakter, dan riwayat
+  di atas ~240 ribu karakter dibuang dari yang tertua (jejak tool dulu), ditandai satu pesan `[session-bridge]`.
+  Isi lengkap tetap di sesi asal dan di bundle. Markup `:codex-file-citation` jadi nama file biasa.
+- Salinan yang dihapus di tujuan dibuat ulang saat dipindahkan manual lagi.
 - Delta menampilkan waktu buat thread, bukan waktu ubah, jadi batas hari untuk Delta sebagai sumber memakai waktu buat.
 - Kirim thread Delta panjang yang putus di tengah penambahan bisa menggandakan batch pertama saat diulang.
 

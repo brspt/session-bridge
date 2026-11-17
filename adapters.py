@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core import ACTIVE_SECS, TOOL_CAP, Meta, Msg, Session, backup_db, cap, clean, flatten, state_dir, tr
+from core import ACTIVE_SECS, CITATION, TOOL_CAP, Meta, Msg, Session, backup_db, cap, clean, flatten, state_dir, tr
 
 HOME = Path.home()
 APPDATA = Path(os.environ.get('APPDATA') or HOME / 'AppData/Roaming')
@@ -63,9 +63,6 @@ def text_of(content):
             if key in content:
                 return text_of(content[key])
     return ''
-
-
-CITATION = re.compile(r':codex-file-citation\{[^}]*?path="([^"]+)"[^}]*\}')  # Codex-only markup, shows raw elsewhere.
 
 
 def tool_input(arg):
@@ -1411,48 +1408,194 @@ class AionUi(Adapter):
         return session
 
 
+def pb_varint(n):
+    out = bytearray()
+    while True:
+        out.append(n & 0x7f | (0x80 if n > 0x7f else 0))
+        n >>= 7
+        if not n:
+            return bytes(out)
+
+
+def pb(*fields):
+    """Protobuf from (number, value) pairs: int -> varint, str/bytes -> length-delimited."""
+    out = b''
+    for num, value in fields:
+        if isinstance(value, int):
+            out += pb_varint(num << 3) + pb_varint(value)
+        else:
+            value = value.encode('utf-8') if isinstance(value, str) else value
+            out += pb_varint(num << 3 | 2) + pb_varint(len(value)) + value
+    return out
+
+
+def pb_read(data):
+    """(number, value) pairs: varints as int, length-delimited as bytes, fixed widths skipped. Bad data -> []."""
+    data, out, i = data or b'', [], 0
+
+    def varint():
+        nonlocal i
+        n = shift = 0
+        while True:
+            byte = data[i]
+            i += 1
+            n |= (byte & 0x7f) << shift
+            shift += 7
+            if byte < 0x80:
+                return n
+    try:
+        while i < len(data):
+            key = varint()
+            if key & 7 == 0:
+                out.append((key >> 3, varint()))
+            elif key & 7 == 2:
+                size = varint()
+                out.append((key >> 3, data[i:i + size]))
+                i += size
+            elif key & 7 in (1, 5):
+                i += 8 if key & 7 == 1 else 4
+            else:
+                return []
+        return out if i == len(data) else []
+    except IndexError:
+        return []
+
+
+def pb_get(data, num):
+    return next((v for n, v in pb_read(data) if n == num), None)
+
+
+def pb_text(data, num):
+    value = pb_get(data, num)
+    return value.decode('utf-8', 'replace') if isinstance(value, bytes) else ''
+
+
+# The conversation file the Antigravity language server writes (PRAGMA user_version 1), copied from a real one.
+AGY_SCHEMA = '''PRAGMA journal_mode=wal; PRAGMA user_version=1;
+CREATE TABLE `trajectory_meta` (`trajectory_id` text,`cascade_id` text,`trajectory_type` integer,`source` integer,PRIMARY KEY (`trajectory_id`));
+CREATE TABLE `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`has_subtrajectory` numeric NOT NULL DEFAULT false,`metadata` blob,`error_details` blob,`permissions` blob,`task_details` blob,`render_info` blob,`step_payload` blob,`step_format` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));
+CREATE INDEX `idx_steps_status` ON `steps`(`status`);
+CREATE INDEX `idx_steps_step_type` ON `steps`(`step_type`);
+CREATE TABLE `gen_metadata` (`idx` integer,`data` blob,`size` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));
+CREATE TABLE `executor_metadata` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));
+CREATE TABLE `parent_references` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));
+CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT "main",`data` blob,PRIMARY KEY (`id`));
+CREATE TABLE `battle_mode_infos` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));'''
+AGY_USER, AGY_REPLY, AGY_TOOL, AGY_DONE = 14, 15, 132, 3
+
+
 class Antigravity(Adapter):
-    name, label = 'antigravity', 'Antigravity'
-    note = 'Baca-saja lewat indeks teks; langkah aslinya protobuf tanpa skema.'
+    """One SQLite file per conversation; each step is a protobuf. The app lists new files on its own."""
+    name, label, can_write = 'antigravity', 'Antigravity', True
+    note = 'Tulis meniru bentuk langkah aslinya; alat jadi teks.'
+    after = 'Mulai ulang Antigravity bila sedang terbuka; percakapannya muncul di daftar percakapan.'
 
     @property
-    def db(self):
-        return HOME / '.gemini/antigravity/conversation_summaries.db'
+    def root(self):
+        return HOME / '.gemini/antigravity'
+
+    def _path(self, session_id):
+        if not UUID.fullmatch(session_id or ''):
+            raise KeyError(session_id)
+        return self.root / 'conversations' / f'{session_id}.db'
 
     def available(self):
-        return self.db.exists()
+        return (self.root / 'conversations').is_dir()
 
     def location(self):
-        return str(self.db)
+        return str(self.root / 'conversations')
+
+    def _title(self, session_id):
+        with contextlib.suppress(OSError, UnicodeError):
+            found = re.search(r'^title:\s*"((?:[^"\\]|\\.)*)"', (self.root / 'annotations' / f'{session_id}.pbtxt')
+                              .read_text(encoding='utf-8'), re.M)
+            return re.sub(r'\\(.)', r'\1', found[1]) if found else ''
+        return ''
 
     def list(self):
-        with contextlib.closing(ro(self.db)) as conn:
-            rows = conn.execute('SELECT conversation_id, title, last_modified_time, step_count, workspace_uris '
-                                'FROM conversation_summaries').fetchall()
-        return [Meta(r[0], r[1] or r[0], epoch(r[2]), str(r[4] or ''), f'{r[2]}:{r[3]}') for r in rows]
+        known = {}
+        with contextlib.suppress(sqlite3.Error), contextlib.closing(ro(self.root / 'conversation_summaries.db')) as conn:
+            known = {r[0]: r[1:] for r in conn.execute('SELECT conversation_id, title, workspace_uris FROM conversation_summaries')}
+        out = []
+        for path in (self.root / 'conversations').glob('*.db'):
+            stats = [p.stat() for p in (path, path.with_name(path.name + '-wal')) if p.exists()]
+            title, cwd = known.get(path.stem, ('', ''))
+            out.append(Meta(path.stem, title or self._title(path.stem) or path.stem, max(s.st_mtime for s in stats),
+                            str(cwd or ''), ':'.join(f'{s.st_mtime_ns}-{s.st_size}' for s in stats)))
+        return out
+
+    def has(self, session_id):
+        with contextlib.suppress(KeyError):
+            return self._path(session_id).exists()
+        return False
+
+    def busy(self, session_id):
+        path = self._path(session_id)
+        return any(recently_touched(p) for p in (path, path.with_name(path.name + '-wal')))
 
     def load(self, session_id):
-        with contextlib.closing(ro(self.db)) as conn:
-            rows = conn.execute('''SELECT c8, c9, c13, c14, c10, c11, c4 FROM conversations_fts_content
-                                   WHERE c0=? AND c1>=0 ORDER BY c1''', (session_id,)).fetchall()
-        session = Session(self.name, session_id)
-        steps = []
-        for user_off, agent_off, user_body, agent_body, title, workspace, modified in rows:
-            session.title = session.title or title or ''
-            session.cwd = session.cwd or workspace or ''
-            session.updated = max(session.updated, epoch(modified))
-            # Offsets are [[step, byte], ...] into the body of that side.
-            for role, offsets, body in (('user', user_off, user_body), ('assistant', agent_off, agent_body)):
-                if not offsets or not body:
-                    continue
-                raw = body.encode('utf-8') if isinstance(body, str) else body
-                pairs = json.loads(offsets)
-                for index, (step, start) in enumerate(pairs):
-                    end = pairs[index + 1][1] if index + 1 < len(pairs) else len(raw)
-                    steps.append((step, role, raw[start:end].decode('utf-8', 'replace').strip()))
-        session.messages = [Msg(role, text) for _, role, text in sorted(steps, key=lambda s: s[0]) if text]
+        meta = next((m for m in self.list() if m.id == session_id), None)
+        session = Session(self.name, session_id, meta.title if meta and meta.title != session_id else '', meta.cwd if meta else '')
+        with contextlib.closing(ro(self._path(session_id))) as conn:
+            rows = conn.execute('SELECT step_type, metadata, step_payload FROM steps ORDER BY idx').fetchall()
+        pending = []  # Tool results follow their calls in order, one result step per call.
+        for kind, metadata, payload in rows:
+            stamp = pb_get(metadata, 1)
+            ts = (pb_get(stamp, 1) or 0) + (pb_get(stamp, 2) or 0) / 1e9
+            session.updated = max(session.updated, ts)
+            if kind == AGY_USER:
+                body = pb_get(payload, 19)
+                text = pb_text(body, 2) or '\n'.join(pb_text(v, 1) for n, v in pb_read(body) if n == 3)
+                session.messages.append(Msg('user', text, ts))
+            elif kind == AGY_REPLY:
+                body = pb_get(payload, 20)
+                session.messages.append(Msg('assistant', pb_text(body, 8) or pb_text(body, 1), ts))
+                for call in (v for n, v in pb_read(body) if n == 7):
+                    tool = {'id': pb_text(call, 1), 'name': pb_text(call, 2), 'input': pb_text(call, 3), 'output': ''}
+                    session.messages.append(Msg('tool', '', ts, tool))
+                    pending.append(tool)
+            elif kind == AGY_TOOL and pending:
+                pending.pop(0)['output'] = pb_text(pb_get(pb_get(payload, 140), 2), 1)
+        session.messages = clean(session.messages)
         session.title = session.title or title_from(session.messages)
         return session
+
+    @staticmethod
+    def _steps(conn, msgs):
+        traj, cid = conn.execute('SELECT trajectory_id, cascade_id FROM trajectory_meta').fetchone()
+        idx = conn.execute('SELECT COALESCE(MAX(idx), -1) FROM steps').fetchone()[0]
+        for msg in flatten(msgs):
+            idx += 1
+            ts, user = msg.ts or time.time(), msg.role == 'user'
+            meta = pb((1, pb((1, int(ts)), (2, int(ts % 1 * 1e9)))), (3, 4 if user else 2), (12, str(uuid.uuid4())),
+                      (20, pb((1, traj), (2, idx), (4, cid))))
+            kind = AGY_USER if user else AGY_REPLY
+            body = (19, pb((2, msg.text), (3, pb((1, msg.text))))) if user else (20, pb((1, msg.text), (8, msg.text), (12, 2)))
+            conn.execute('INSERT INTO steps(idx, step_type, status, metadata, step_payload) VALUES(?,?,?,?,?)',
+                         (idx, kind, AGY_DONE, meta, pb((1, kind), (4, AGY_DONE), (5, meta), body)))
+
+    def create(self, session):
+        cid = str(uuid.uuid4())
+        path = self._path(cid)
+        title = ' '.join((session.title or title_from(session.messages) or 'Sesi').split())
+        notes = self.root / 'annotations'
+        notes.mkdir(exist_ok=True)
+        (notes / f'{cid}.pbtxt').write_text('title: "%s"\n' % title.replace('\\', '\\\\').replace('"', '\\"'), encoding='utf-8')
+        with contextlib.closing(sqlite3.connect(path, timeout=30)) as conn:
+            conn.executescript(AGY_SCHEMA)
+            with conn:
+                conn.execute('INSERT INTO trajectory_meta VALUES(?,?,4,1)', (str(uuid.uuid4()), cid))
+                conn.execute("INSERT INTO trajectory_metadata_blob VALUES('main', ?)", (pb((2, pb((1, int(time.time())))), (6, cid)),))
+                self._steps(conn, session.messages)
+        return cid
+
+    def append(self, session_id, msgs):
+        path = self._path(session_id)
+        backup_db(path, f'antigravity-{session_id[:8]}')
+        # ponytail: an open Antigravity keeps a loaded conversation in memory and sees appended steps only after a
+        # restart (see `after`); busy() only catches recent writes. Check its language server if that bites.
+        with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=30)) as conn, conn:
+            self._steps(conn, msgs)
 
 
 def walk_messages(node, out, depth=0):

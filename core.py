@@ -5,6 +5,7 @@ import json
 import logging
 import msvcrt
 import os
+import re
 import sqlite3
 import time
 from collections import Counter
@@ -14,6 +15,10 @@ from pathlib import Path
 
 # ponytail: tool blobs capped when written to another harness so resume doesn't choke; bundles keep full content.
 TOOL_CAP = 8000
+TOOL_KEEP = 400  # Per tool input/output when copying to another harness: the gist, not the whole log.
+# ponytail: one fixed budget (~60k tokens) for every destination; make it per-destination if a harness needs more.
+HISTORY_CAP = 240_000
+CITATION = re.compile(r':codex-file-citation\{[^}]*?path="([^"]+)"[^}]*\}')  # Codex-only markup, shows raw elsewhere.
 ACTIVE_SECS = 60  # A file touched this recently is probably in use: retry next tick.
 BUNDLE_FORMAT = 'session-bridge/1'
 BUNDLE = 'bundle'
@@ -83,6 +88,36 @@ def flatten(msgs):
     return [Msg('user' if m.role == 'user' else 'assistant', flat(m), m.ts) for m in clean(msgs)]
 
 
+def fit(msgs):
+    """Shape a copy so the destination model can load it: short tool traces, oldest history dropped past the budget."""
+    out = []
+    for m in msgs:
+        if m.role == 'tool':
+            tool, arg = dict(m.tool or {}), (m.tool or {}).get('input')
+            encoded = arg if isinstance(arg, str) or arg is None else json.dumps(arg, ensure_ascii=False)
+            tool['input'] = cap(encoded, TOOL_KEEP) if len(encoded or '') > TOOL_KEEP else arg
+            tool['output'] = cap(tool.get('output'), TOOL_KEEP)
+            out.append(Msg(m.role, m.text, m.ts, tool))
+        else:
+            out.append(Msg(m.role, cap(CITATION.sub(r'`\1`', m.text or ''), HISTORY_CAP // 4), m.ts, m.tool))
+    sizes = [len(flat(m)) for m in out]
+    total, drop = sum(sizes), set()
+    for tools_first in (True, False):  # Oldest tool traces go first, then oldest talk; the last message always stays.
+        for i, m in enumerate(out[:-1]):
+            if total <= HISTORY_CAP:
+                break
+            if (m.role == 'tool') == tools_first:
+                drop.add(i)
+                total -= sizes[i]
+    if not drop:
+        return out
+    tools = sum(out[i].role == 'tool' for i in drop)
+    kept = [m for i, m in enumerate(out) if i not in drop]
+    note = tr('[session-bridge] {tools} jejak alat dan {old} pesan lama tidak disalin supaya riwayat muat di konteks '
+              'model. Isi lengkapnya ada di sesi asal.', tools=tools, old=len(drop) - tools)
+    return [Msg('user', note, kept[0].ts)] + kept
+
+
 def digests(msgs):
     """Stable per message across harnesses: tool blocks and their flat copies hash alike."""
     count, out = Counter(), []
@@ -146,6 +181,12 @@ class State:
     def mark(self, group, harness, values):
         with self.db:
             self.db.executemany('INSERT OR IGNORE INTO seen VALUES(?,?,?)', [(group, harness, v) for v in values])
+
+    def forget(self, group, harness):
+        """The copy in `harness` is gone: drop its link and marks so a manual move can make it again."""
+        with self.db:
+            self.db.execute('DELETE FROM links WHERE group_id=? AND harness=?', (group, harness))
+            self.db.execute('DELETE FROM seen WHERE group_id=? AND harness=?', (group, harness))
 
     def fingerprint(self, src, session_id, dst):
         row = self.db.execute('SELECT fp FROM fingerprints WHERE src=? AND session_id=? AND dst=?',
@@ -274,6 +315,9 @@ def sync_session(state, session, src_name, dst, dry=False, force=False):
     origin = session.origin or {}
     group = group_for(state, session, src_name)
     peer = state.peer(group, dst.name)
+    if peer and force and not dry and not dst.has(peer[0]):
+        state.forget(group, dst.name)  # The user deleted the copy and moves it again.
+        peer = None
     if not peer and origin.get('harness') == dst.name and dst.has(origin.get('id')):
         peer = (origin['id'], 1)  # A bundle returning to the machine that exported it.
         if not dry:
@@ -306,10 +350,10 @@ def sync_session(state, session, src_name, dst, dry=False, force=False):
     if peer:
         target = peer[0]
         before = set(digests(clean(dst.load(target).messages)))
-        dst.append(target, missing)
+        dst.append(target, fit(missing))
     else:
         before = set()
-        copy = Session(**{**session.__dict__, 'messages': missing, 'origin': {**origin, 'group': group}})
+        copy = Session(**{**session.__dict__, 'messages': fit(missing), 'origin': {**origin, 'group': group}})
         target = dst.create(copy)
         state.link(group, dst.name, target)
     state.mark(group, dst.name, written)
@@ -476,6 +520,10 @@ EN = {
     'GAGAL {what}: {error}': 'FAILED {what}: {error}',
     'GAGAL rute {what}: {error}': 'FAILED route {what}: {error}',
     'GAGAL: {error}': 'FAILED: {error}',
+    '[session-bridge] {tools} jejak alat dan {old} pesan lama tidak disalin supaya riwayat muat di konteks model. '
+    'Isi lengkapnya ada di sesi asal.':
+        '[session-bridge] {tools} tool traces and {old} older messages were not copied so the history fits the '
+        "model's context. The full content is in the source session.",
     'Rute {route} dilewati: harness tidak ada atau baca-saja.': 'Route {route} skipped: harness missing or read-only.',
     'Sinkron lain masih berjalan. Coba lagi sebentar.': 'Another sync is still running. Try again shortly.',
     'Sinkron lain masih berjalan.': 'Another sync is still running.',
@@ -519,7 +567,9 @@ EN = {
     'aionui: buat satu percakapan di AionUi dulu, supaya pemiliknya diketahui':
         'aionui: create one conversation in AionUi first, so its owner is known',
     'aionui: percakapan {id} sedang berjalan di AionUi; tunggu selesai': 'aionui: conversation {id} is running in AionUi; wait for it to finish',
-    'Baca-saja lewat indeks teks; langkah aslinya protobuf tanpa skema.': 'Read-only through the text index; the real steps are schemaless protobuf.',
+    'Tulis meniru bentuk langkah aslinya; alat jadi teks.': 'Writes mimic its native step format; tools become text.',
+    'Mulai ulang Antigravity bila sedang terbuka; percakapannya muncul di daftar percakapan.':
+        'Restart Antigravity if it is open; the conversation shows up in its conversation list.',
     'Baca-saja, belum diverifikasi: perangkat ini belum punya thread Zed.': 'Read-only, unverified: this device has no Zed threads yet.',
     'Hanya sesi agen; chat utamanya (IndexedDB) tidak didukung. Tulis meniru bentuk baris yang ada, '
     'belum diperiksa aplikasinya; agennya tidak otomatis mengingat riwayatnya. Alat jadi teks.':
