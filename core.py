@@ -34,6 +34,19 @@ def codex_root():
     return Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
 
 
+def folder_key(path):
+    """One spelling per project folder: harnesses differ in case, slashes and the \\\\?\\ prefix."""
+    return os.path.normcase(os.path.normpath(path.removeprefix('\\\\?\\'))).rstrip(os.sep) if path else ''
+
+
+def in_folder(cwd, folder):
+    """The session ran in `folder` or below it. No folder means every session."""
+    if not folder:
+        return True
+    cwd, folder = folder_key(cwd), folder_key(folder)
+    return cwd == folder or cwd.startswith(folder + os.sep)
+
+
 @dataclass
 class Msg:
     role: str  # user | assistant | tool
@@ -255,13 +268,15 @@ def effective_routes(routes, mirror):
     """delta-sync already carries Codex -> Delta, including threads this program adds to Codex."""
     keep, notes = [], []
     active = bool(mirror and mirror['active'])
-    for src, dst in routes:
+    folder = lambda route: (*route, '')[2]  # A route may carry a project folder as its third item.
+    for route in routes:
+        src, dst = route[:2]
         if active and dst == 'delta' and src == 'codex':
             notes.append(tr('Rute codex→delta dilewati: sudah ditangani delta-sync.'))
-        elif active and dst == 'delta' and (src, 'codex') in routes:
+        elif active and dst == 'delta' and any(r[:2] == (src, 'codex') and folder(r) in ('', folder(route)) for r in routes):
             notes.append(tr('Rute {src}→delta dilewati: {src}→codex lalu delta-sync sudah membawanya.', src=src))
         else:
-            keep.append((src, dst))
+            keep.append(route)
     return keep, notes
 
 
@@ -365,10 +380,12 @@ def sync_session(state, session, src_name, dst, dry=False, force=False):
     return ('tambah' if peer else 'baru'), len(missing)
 
 
-def sync_route(state, src, dst, since_days, mirror, dry=False, log=lambda _: None):
+def sync_route(state, src, dst, since_days, mirror, dry=False, log=lambda _: None, folder=''):
     results = []
     cutoff = time.time() - since_days * 86400 if since_days else 0
     for meta in src.list():
+        if not in_folder(meta.cwd, folder):
+            continue
         # A group link alone isn't enough: adopt() links almost everything, and old history must stay home.
         group = state.group_of(src.name, meta.id)
         if meta.updated < cutoff and not (group and state.peer(group, dst.name)):
@@ -402,20 +419,20 @@ def sync_all(cfg, adapters, dry=False, log=lambda _: None):
         if not free:
             return None
         mirror = read_mirror()
-        routes, notes = effective_routes([tuple(r) for r in cfg.get('routes', [])], mirror)
+        routes, notes = effective_routes([(*r[:2], r[2] if len(r) > 2 else '') for r in cfg.get('routes', [])], mirror)
         for note in notes:
             logging.info(note)
             log(note)
         state = State()
         adopt(state, mirror)
         results = []
-        for src_name, dst_name in routes:
+        for src_name, dst_name, folder in routes:
             src, dst = adapters.get(src_name), adapters.get(dst_name)
             if not src or not dst or not dst.can_write:
                 log(tr('Rute {route} dilewati: harness tidak ada atau baca-saja.', route=f'{src_name}→{dst_name}'))
                 continue
             try:
-                results += sync_route(state, src, dst, cfg.get('since_days', 7), mirror, dry, log)
+                results += sync_route(state, src, dst, cfg.get('since_days', 7), mirror, dry, log, folder)
             except Exception as error:
                 logging.warning('route %s -> %s failed: %s', src_name, dst_name, type(error).__name__)
                 log(tr('GAGAL rute {what}: {error}', what=f'{src_name}→{dst_name}', error=tr(str(error))))
@@ -660,6 +677,12 @@ EN = {
     'DeepSeek dan data sensitif': 'DeepSeek and sensitive data', 'Daftar harness': 'Harness list', 'Deteksi ulang': 'Detect again',
     'Pilih satu baris untuk membaca lokasi dan catatan lengkapnya.': 'Select a row to read its full location and notes.',
     'Sesi': 'Sessions', 'Akses': 'Access', 'Lokasi': 'Location', 'Catatan': 'Notes',
+    # Project folders and the desktop shortcut
+    'Folder proyek': 'Project folder', 'Semua folder': 'All folders', 'Pilih…': 'Choose…',
+    'Pilih folder: semua chat di folder itu langsung terpilih.': 'Pick a folder: every chat in it gets selected.',
+    'kosong = semua folder': 'empty = all folders', 'Pilih folder proyek': 'Choose project folder',
+    'Shortcut di desktop': 'Desktop shortcut', 'Shortcut dibuat: {path}': 'Shortcut made: {path}',
+    'Shortcut gagal dibuat: {error}': 'Could not make the shortcut: {error}',
 }
 
 

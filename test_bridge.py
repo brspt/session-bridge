@@ -25,7 +25,7 @@ class Mem:
     can_write = True
 
     def __init__(self, name, reformat=False):
-        self.name, self.reformat, self.store, self.count = name, reformat, {}, 0
+        self.name, self.reformat, self.store, self.count, self.cwd = name, reformat, {}, 0, {}
 
     def add(self, sid, *texts, age=3600):
         import core
@@ -36,7 +36,7 @@ class Mem:
 
     def _meta(self, sid):
         import core
-        return core.Meta(sid, f'judul {sid}', self.store[sid][-1].ts, '', str(len(self.store[sid])))
+        return core.Meta(sid, f'judul {sid}', self.store[sid][-1].ts, self.cwd.get(sid, ''), str(len(self.store[sid])))
 
     def list(self):
         return [self._meta(s) for s in self.store]
@@ -189,6 +189,17 @@ def check_engine(root):
     assert core.sync_route(state, a, c, 7, None) == [] and not c.store, 'since_days bypassed by group link'
     assert core.sync_route(state, a, b, 7, None)[0][4] == 'adopsi', 'existing peer must stay in sync'
 
+    # Project folder: one spelling per folder, subfolders belong to it, a saved route can be limited to one.
+    assert core.in_folder('\\\\?\\D:\\Proj\\sub', 'd:/proj/') and core.in_folder('', '') and not core.in_folder('D:\\Projek', 'D:\\Proj')
+    box = fresh(root, 'folder')
+    os.environ['CODEX_HOME'] = str(box / 'codex')  # No real delta-sync state in this pass.
+    a, b = Mem('a'), Mem('b')
+    a.add('in', 'di proyek', 'jawab')
+    a.add('out', 'di luar', 'jawab')
+    a.cwd = {'in': 'D:\\Proj\\app', 'out': 'D:\\Lain'}
+    assert [r[2] for r in core.sync_all({'routes': [['a', 'b', 'D:/Proj']], 'since_days': 0}, {'a': a, 'b': b})] == ['in']
+    assert [r[2] for r in core.sync_all({'routes': [['a', 'b']], 'since_days': 0}, {'a': a, 'b': b})] == ['out']
+
     # delta-sync coexistence.
     fresh(root, 'mirror')
     state = core.State()
@@ -209,6 +220,8 @@ def check_engine(root):
     assert keep == [('claude', 'codex'), ('delta', 'claude')]
     assert skip(state, {**mirror, 'active': False}, 'codex', 'new', 'delta') == ''
     assert core.effective_routes([('codex', 'delta')], None)[0] == [('codex', 'delta')]
+    folders = [('claude', 'codex', 'D:\\A'), ('claude', 'delta', 'D:\\B'), ('claude', 'delta', 'D:\\A')]
+    assert core.effective_routes(folders, mirror)[0] == folders[:2], 'a folder route to codex only covers that folder'
 
     # Moving a mirrored Delta thread by hand takes its Codex original, once; nothing copied is never "already there".
     cx, dl, oc = Mem('codex'), Mem('delta'), Mem('opencode')
@@ -845,6 +858,18 @@ def check_gui(root):
         wait(lambda: 'Selesai: 3 pesan' in said(gui.transfer_log))
         assert len(codex.list()) == 1 and [m.title for m in codex.list()] == ['Judul Asli']
 
+        assert gui.folders() == ['D:\\proj']
+        gui.tree.selection_set(())
+        gui.folder.set('d:/PROJ')  # Any spelling of the folder picks every chat in it.
+        gui.on_folder()
+        assert gui.tree.selection() == gui.tree.get_children() != () and gui.count.get() == '1 dari 1 sesi'
+        gui.folder.set('D:\\proyek-lain')
+        gui.on_folder()
+        assert not gui.tree.get_children()
+        gui.folder.set('Semua folder')
+        gui.render()
+        pick_all()
+
         gui.dst.set(app.BUNDLE_LABEL)
         gui.execute()
         wait(lambda: 'tersimpan di' in said(gui.transfer_log))
@@ -878,6 +903,16 @@ def check_gui(root):
         wait(lambda: gui.status.get().endswith(' aktif'))
         gui.stop_watch()
         wait(lambda: gui.status.get().endswith(' mati') and not app.watch_running())  # "otomatis" also contains "mati".
+
+        gui.route_folder.set('D:\\proj')
+        gui.both.set(False)
+        gui.add_route()
+        assert core.load_cfg()['routes'][-1] == ['claude', 'codex', 'D:\\proj'] and gui.routes.get('end').endswith('·   D:\\proj')
+        gui.routes.selection_set('end')
+        gui.del_route()
+        assert len(core.load_cfg()['routes']) == 2
+        lnk = Path(app.make_shortcut(box))
+        assert lnk == box / 'Session Bridge.lnk' and lnk.stat().st_size, lnk
 
         assert not app.login_enabled()
         app.set_login(True)

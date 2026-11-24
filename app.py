@@ -8,6 +8,7 @@
     SessionBridge.exe --stop          ask the background auto-sync to stop
     SessionBridge.exe --watch         the auto-sync loop itself, in this process
     SessionBridge.exe --self-test     sandboxed self-check
+    SessionBridge.exe --shortcut      put a Session Bridge shortcut on the desktop
 
 A windowed EXE has no console, so CLI output also goes to ~/.session-bridge/last-output.txt.
 """
@@ -74,6 +75,23 @@ def set_login(enabled):
                 winreg.DeleteValue(key, RUN_VALUE)
 
 
+def make_shortcut(folder=None):
+    """`Session Bridge.lnk` on the desktop (or in `folder`) through WScript.Shell, so no new dependency. Returns its path."""
+    target, *args = self_cmd()
+    script = ("try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; "
+              "$d = if ($env:SB_FOLDER) { $env:SB_FOLDER } else { [Environment]::GetFolderPath('Desktop') }; "
+              "$s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d 'Session Bridge.lnk')); "
+              "$s.TargetPath = $env:SB_TARGET; $s.Arguments = $env:SB_ARGS; $s.WorkingDirectory = $env:SB_DIR; "
+              "$s.Description = 'Session Bridge'; $s.Save(); $s.FullName")
+    env = {**os.environ, 'SB_FOLDER': str(folder or ''), 'SB_TARGET': target, 'SB_ARGS': subprocess.list2cmdline(args),
+           'SB_DIR': str(Path(args[0] if args else target).parent)}
+    done = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], env=env, capture_output=True,
+                          encoding='utf-8', errors='replace', creationflags=subprocess.CREATE_NO_WINDOW)
+    if done.returncode:
+        raise RuntimeError(tr('Shortcut gagal dibuat: {error}', error=done.stderr.strip()[-300:]))
+    return done.stdout.strip()
+
+
 def watch_running():
     with core.single('watch.lock') as free:
         return not free
@@ -132,6 +150,9 @@ def cli(flag):
         return 0
     if flag == '--stop':
         (core.state_dir() / 'STOP').touch()
+        return 0
+    if flag == '--shortcut':
+        emit(make_shortcut())
         return 0
     if flag == '--detect':
         emit(json.dumps(A.detect_rows(A.registry()), ensure_ascii=False, indent=1))
@@ -346,6 +367,10 @@ class App:
         self.lang.set(next(k for k, v in LANGS.items() if v == core.LANG))
         self.lang.pack(side='left', fill='x', expand=True)
         self.lang.bind('<<ComboboxSelected>>', lambda _event: LANGS[self.lang.get()] != core.LANG and self.set_lang(LANGS[self.lang.get()]))
+        ttk.Button(self.side, text=tr('Shortcut di desktop'), command=self.shortcut).pack(side='bottom', fill='x', padx=8, pady=(0, 10))
+
+    def shortcut(self):
+        self.run(make_shortcut, lambda path: messagebox.showinfo('Session Bridge', tr('Shortcut dibuat: {path}', path=path)))
 
     def add_page(self, name, nav, title, intro):
         ttk.Radiobutton(self.side, text=nav, value=name, variable=self.page, command=self.goto, style='Nav.TRadiobutton').pack(fill='x', pady=1)
@@ -477,6 +502,15 @@ class App:
         self.query.trace_add('write', lambda *_: self.render())
         ttk.Entry(head, textvariable=self.query, width=26).pack(side='right', padx=(6, 0))
         ttk.Label(head, text=tr('Cari'), style='Muted.TLabel').pack(side='right')
+        line = ttk.Frame(body)
+        line.pack(fill='x', pady=(0, 10))
+        ttk.Label(line, text=tr('Folder proyek')).pack(side='left')
+        self.folder = ttk.Combobox(line, state='readonly', width=60,
+                                   postcommand=lambda: self.folder.configure(values=[tr('Semua folder')] + self.folders()))
+        self.folder.set(tr('Semua folder'))
+        self.folder.pack(side='left', padx=(8, 10))
+        self.folder.bind('<<ComboboxSelected>>', lambda _event: self.on_folder())
+        ttk.Label(line, text=tr('Pilih folder: semua chat di folder itu langsung terpilih.'), style='Muted.TLabel').pack(side='left')
         foot = ttk.Frame(body)
         foot.pack(side='bottom', fill='x', pady=(12, 0))
         self.go_note = tk.StringVar()
@@ -548,18 +582,30 @@ class App:
         self.tree.delete(*self.tree.get_children())
         self.render()
 
+    def folders(self):
+        """Project folders of the listed sessions, one spelling each."""
+        return [cwd for _, cwd in sorted({core.folder_key(m.cwd): m.cwd for m in self.metas if m.cwd}.items())]
+
+    def picked_folder(self):
+        return '' if self.folder.get() == tr('Semua folder') else self.folder.get()
+
+    def on_folder(self):
+        self.render()
+        if self.picked_folder():
+            self.pick_all()
+
     def render(self):
-        """Search filter: every word must appear in the title or folder. Selection survives while still visible."""
+        """Folder and search filters: every word must appear in the title or folder. Selection survives while still visible."""
         keep = set(self.tree.selection())
-        words = self.query.get().lower().split()
-        rows = [m for m in self.metas if all(w in f'{m.title} {m.cwd}'.lower() for w in words)]
+        words, folder = self.query.get().lower().split(), self.picked_folder()
+        rows = [m for m in self.metas if core.in_folder(m.cwd, folder) and all(w in f'{m.title} {m.cwd}'.lower() for w in words)]
         self.tree.delete(*self.tree.get_children())
         for meta in rows:
             when = datetime.fromtimestamp(meta.updated).strftime('%Y-%m-%d %H:%M') if meta.updated else ''
             self.tree.insert('', 'end', iid=meta.id, values=(meta.title, when, meta.cwd))
         self.tree.selection_set([m.id for m in rows if m.id in keep])
         total = len(self.metas)
-        self.count.set(tr('{x} dari {n} sesi', x=len(rows), n=total) if words else tr('{n} sesi', n=total) if total else tr('Belum ada sesi'))
+        self.count.set(tr('{x} dari {n} sesi', x=len(rows), n=total) if words or folder else tr('{n} sesi', n=total) if total else tr('Belum ada sesi'))
         self.refresh_go()
 
     def pick_all(self):
@@ -634,6 +680,13 @@ class App:
         self.both = tk.BooleanVar(value=False)
         ttk.Checkbutton(line, text=tr('Dua arah'), variable=self.both).pack(side='left')
         ttk.Button(line, text=tr('+  Tambah rute'), command=self.add_route).pack(side='right')
+        line = ttk.Frame(body)
+        line.pack(fill='x', pady=(10, 0))
+        ttk.Label(line, text=tr('Folder proyek')).pack(side='left')
+        self.route_folder = ttk.Combobox(line, width=56, postcommand=lambda: self.route_folder.configure(values=self.folders()))
+        self.route_folder.pack(side='left', padx=8)
+        ttk.Button(line, text=tr('Pilih…'), command=self.pick_route_folder).pack(side='left')
+        ttk.Label(line, text=tr('kosong = semua folder'), style='Muted.TLabel').pack(side='left', padx=10)
         self.routes = tk.Listbox(body, height=4, selectmode='extended', activestyle='none', relief='flat', bd=0, highlightthickness=1,
                                  highlightbackground=LINE, highlightcolor=ACCENT, bg=CARD, fg=TEXT, selectbackground=ACCENT_SOFT,
                                  selectforeground=TEXT, font='TkDefaultFont')
@@ -678,10 +731,16 @@ class App:
         adapter = self.adapters.get(name)
         return adapter.label if adapter else name
 
+    def pick_route_folder(self):
+        path = filedialog.askdirectory(title=tr('Pilih folder proyek'))
+        if path:
+            self.route_folder.set(os.path.normpath(path))
+
     def show_routes(self):
         self.routes.delete(0, 'end')
-        for src, dst in self.cfg['routes']:
-            self.routes.insert('end', f'  {self.route_name(src)}   →   {self.route_name(dst)}')
+        for route in self.cfg['routes']:
+            where = f'   ·   {route[2]}' if len(route) > 2 and route[2] else ''
+            self.routes.insert('end', f'  {self.route_name(route[0])}   →   {self.route_name(route[1])}{where}')
         count = len(self.cfg['routes'])
         self.route_hint.set(tr('{n} rute. Pilih rute lalu Hapus terpilih untuk melepasnya.', n=count) if count else
                             tr('Belum ada rute. Pilih Dari dan Ke di atas, lalu Tambah rute.'))
@@ -691,7 +750,8 @@ class App:
         if not src or not dst or src is dst:
             messagebox.showinfo('Session Bridge', tr('Pilih dua harness yang berbeda.'))
             return
-        wanted = [[src.name, dst.name]] + ([[dst.name, src.name]] if self.both.get() and src.can_write else [])
+        folder = [self.route_folder.get().strip()] if self.route_folder.get().strip() else []
+        wanted = [[src.name, dst.name, *folder]] + ([[dst.name, src.name, *folder]] if self.both.get() and src.can_write else [])
         self.cfg['routes'] += [r for r in wanted if r not in self.cfg['routes']]
         self.save()
         self.show_routes()

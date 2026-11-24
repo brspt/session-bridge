@@ -5,17 +5,22 @@ Jalankan `SessionBridge.exe`. Tidak perlu instal apa pun, tapi harness tujuan ha
 
 > **English:** one Windows EXE to move and auto-sync chat sessions between Claude Code, Codex, Delta,
 > OpenCode, Hermes, DeepSeek Harness, Copilot CLI, AionUi, Cherry Studio, Antigravity and other detected AI harnesses. Download `SessionBridge.exe` from Releases and run it.
-> Switch the window to English with **Bahasa → English** at the bottom left.
+> Switch the window to English with **Bahasa → English** at the bottom left. Pick a **project folder** to move every
+> chat of one project at once or to limit a sync route to it, and press **Desktop shortcut** for a desktop icon.
 
 ## Halaman
 
 Menu di kiri. Status sinkron otomatis selalu tampil di pojok kiri bawah (klik untuk ke halamannya).
 Di atasnya ada pilihan **Bahasa** (`Indonesia` / `English`). Jendela langsung berganti bahasa dan pilihannya
-tersimpan di `config.json`, juga dipakai output baris perintah.
+tersimpan di `config.json`, juga dipakai output baris perintah. Tombol **Shortcut di desktop** membuat
+ikon `Session Bridge` di desktop (sama dengan `SessionBridge.exe --shortcut`).
 
 **Pindahkan.** (1) Pilih `Dari` dan `Ke`. Tombol `⇄` membalik arah. (2) Centang sesi di tabel
 (`Cari` menyaring judul dan folder, `Pilih semua` memilih yang tampil), lalu tekan tombol biru
 `Pindahkan N sesi ke …`. Hasilnya muncul di `Aktivitas`.
+
+`Folder proyek` menampilkan hanya chat yang dijalankan di folder itu (termasuk subfolder) dan langsung
+memilih semuanya, jadi satu proyek bisa dipindahkan sekaligus. `Semua folder` mengembalikan daftar penuh.
 
 - Chat asli di harness asal tetap ada. Data di tujuan tidak diubah atau dihapus.
 - `File bundle (.json)` bisa dipilih di kedua sisi: sebagai `Ke` untuk cadangan atau pindah PC, sebagai `Dari` untuk memasukkannya lagi.
@@ -25,7 +30,8 @@ tersimpan di `config.json`, juga dipakai output baris perintah.
 - Sinkron otomatis tidak membuka aplikasi desktop, supaya jendela tidak berpindah sendiri saat Anda bekerja.
   Sesi baru hasil sinkron otomatis ke Claude Code: pindahkan sekali lewat halaman ini untuk memunculkannya di tab Code.
 
-**Sinkron Otomatis.** (1) Tambah rute `Dari → Ke` (centang `Dua arah` untuk kedua arah). (2) Atur jadwal dan batas hari. (3) Jalankan:
+**Sinkron Otomatis.** (1) Tambah rute `Dari → Ke` (centang `Dua arah` untuk kedua arah). Isi `Folder proyek` (ketik, pilih dari daftar, atau `Pilih…`)
+supaya rute itu hanya membawa chat dari folder tersebut; kosong = semua folder. (2) Atur jadwal dan batas hari. (3) Jalankan:
 
 - `Pratinjau`: hitung yang akan disalin, tidak menulis apa pun. Selalu coba ini dulu.
 - `Sinkron sekarang`: satu putaran.
@@ -70,6 +76,8 @@ Claude Code (profil `~/.claude/profiles`) atau OpenCode tersimpan di dua harness
 - **Anti gema.** Pesan dikenali dari peran + isi + urutan kemunculan, jadi salinan tidak memantul balik.
 - **Tautan lama dihormati.** Sesi yang sudah dipasangkan (impor Claude dari Codex, cermin delta-sync) tidak
   disalin ulang. Kontak pertama hanya mencatat kondisi (`adopsi`), pesan baru sesudahnya yang disalin.
+- **Folder proyek.** Rute ber-folder hanya membawa sesi yang folder kerjanya sama atau di bawahnya. Penulisan
+  huruf besar/kecil dan garis miring tidak berpengaruh.
 - **Batas hari.** Sesi lebih tua dari batas dilewati, kecuali sudah punya pasangan di tujuan rute itu.
 - **Sesi aktif ditunda.** Sumber atau tujuan yang berubah 60 detik terakhir dicoba lagi putaran berikutnya.
 
@@ -108,6 +116,7 @@ SessionBridge.exe --preview    pratinjau rute tersimpan
 SessionBridge.exe --sync-once  satu putaran sinkron
 SessionBridge.exe --start      mulai proses latar
 SessionBridge.exe --stop       hentikan proses latar
+SessionBridge.exe --shortcut   buat shortcut Session Bridge di desktop
 SessionBridge.exe --self-test  uji diri di folder sementara
 ```
 
