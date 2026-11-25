@@ -78,11 +78,13 @@ def set_login(enabled):
 def make_shortcut(folder=None):
     """`Session Bridge.lnk` on the desktop (or in `folder`) through WScript.Shell, so no new dependency. Returns its path."""
     target, *args = self_cmd()
-    script = ("try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; "
+    # Without the catch a failed Save() still exits 0, and the app would report a shortcut that does not exist.
+    script = ("$ErrorActionPreference = 'Stop'; try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; try { "
               "$d = if ($env:SB_FOLDER) { $env:SB_FOLDER } else { [Environment]::GetFolderPath('Desktop') }; "
               "$s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d 'Session Bridge.lnk')); "
               "$s.TargetPath = $env:SB_TARGET; $s.Arguments = $env:SB_ARGS; $s.WorkingDirectory = $env:SB_DIR; "
-              "$s.Description = 'Session Bridge'; $s.Save(); $s.FullName")
+              "$s.Description = 'Session Bridge'; $s.Save(); $s.FullName "
+              "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }")
     env = {**os.environ, 'SB_FOLDER': str(folder or ''), 'SB_TARGET': target, 'SB_ARGS': subprocess.list2cmdline(args),
            'SB_DIR': str(Path(args[0] if args else target).parent)}
     done = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], env=env, capture_output=True,
@@ -751,6 +753,9 @@ class App:
             messagebox.showinfo('Session Bridge', tr('Pilih dua harness yang berbeda.'))
             return
         folder = [self.route_folder.get().strip()] if self.route_folder.get().strip() else []
+        if folder and not Path(folder[0]).is_absolute():
+            messagebox.showerror('Session Bridge', tr('Folder proyek harus lengkap dengan drive, misalnya D:\\Proyek\\app.'))
+            return
         wanted = [[src.name, dst.name, *folder]] + ([[dst.name, src.name, *folder]] if self.both.get() and src.can_write else [])
         self.cfg['routes'] += [r for r in wanted if r not in self.cfg['routes']]
         self.save()

@@ -273,7 +273,7 @@ def effective_routes(routes, mirror):
         src, dst = route[:2]
         if active and dst == 'delta' and src == 'codex':
             notes.append(tr('Rute codex→delta dilewati: sudah ditangani delta-sync.'))
-        elif active and dst == 'delta' and any(r[:2] == (src, 'codex') and folder(r) in ('', folder(route)) for r in routes):
+        elif active and dst == 'delta' and any(r[:2] == (src, 'codex') and in_folder(folder(route), folder(r)) for r in routes):
             notes.append(tr('Rute {src}→delta dilewati: {src}→codex lalu delta-sync sudah membawanya.', src=src))
         else:
             keep.append(route)
@@ -380,11 +380,12 @@ def sync_session(state, session, src_name, dst, dry=False, force=False):
     return ('tambah' if peer else 'baru'), len(missing)
 
 
-def sync_route(state, src, dst, since_days, mirror, dry=False, log=lambda _: None, folder=''):
+def sync_route(state, src, dst, since_days, mirror, dry=False, log=lambda _: None, folder='', skip=()):
+    """`skip`: folders whose chats this route must leave alone."""
     results = []
     cutoff = time.time() - since_days * 86400 if since_days else 0
     for meta in src.list():
-        if not in_folder(meta.cwd, folder):
+        if not in_folder(meta.cwd, folder) or any(in_folder(meta.cwd, f) for f in skip):
             continue
         # A group link alone isn't enough: adopt() links almost everything, and old history must stay home.
         group = state.group_of(src.name, meta.id)
@@ -431,8 +432,10 @@ def sync_all(cfg, adapters, dry=False, log=lambda _: None):
             if not src or not dst or not dst.can_write:
                 log(tr('Rute {route} dilewati: harness tidak ada atau baca-saja.', route=f'{src_name}→{dst_name}'))
                 continue
+            # Chats a src->codex route takes reach Delta through delta-sync; a copy here would be a second thread.
+            via_codex = [f for s, d, f in routes if (s, d) == (src_name, 'codex')] if dst_name == 'delta' and mirror and mirror['active'] else []
             try:
-                results += sync_route(state, src, dst, cfg.get('since_days', 7), mirror, dry, log, folder)
+                results += sync_route(state, src, dst, cfg.get('since_days', 7), mirror, dry, log, folder, via_codex)
             except Exception as error:
                 logging.warning('route %s -> %s failed: %s', src_name, dst_name, type(error).__name__)
                 log(tr('GAGAL rute {what}: {error}', what=f'{src_name}→{dst_name}', error=tr(str(error))))
@@ -683,6 +686,7 @@ EN = {
     'kosong = semua folder': 'empty = all folders', 'Pilih folder proyek': 'Choose project folder',
     'Shortcut di desktop': 'Desktop shortcut', 'Shortcut dibuat: {path}': 'Shortcut made: {path}',
     'Shortcut gagal dibuat: {error}': 'Could not make the shortcut: {error}',
+    'Folder proyek harus lengkap dengan drive, misalnya D:\\Proyek\\app.': 'The project folder needs its full path with the drive, for example D:\\Proyek\\app.',
 }
 
 

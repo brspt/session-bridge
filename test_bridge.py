@@ -199,6 +199,20 @@ def check_engine(root):
     a.cwd = {'in': 'D:\\Proj\\app', 'out': 'D:\\Lain'}
     assert [r[2] for r in core.sync_all({'routes': [['a', 'b', 'D:/Proj']], 'since_days': 0}, {'a': a, 'b': b})] == ['in']
     assert [r[2] for r in core.sync_all({'routes': [['a', 'b']], 'since_days': 0}, {'a': a, 'b': b})] == ['out']
+    # With delta-sync on, a chat a folder route takes to Codex reaches Delta through it, whatever the route order.
+    box = fresh(root, 'folder-delta')
+    os.environ['CODEX_HOME'] = str(box / 'codex')
+    (box / 'codex/integrations/delta-sync').mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(box / 'codex/integrations/delta-sync/sync-state.sqlite')) as conn:
+        conn.execute('CREATE TABLE threads (codex_id TEXT, delta_id TEXT)')
+    claude, codex, delta = Mem('claude'), Mem('codex'), Mem('delta')
+    claude.add('in', 'di proyek', 'jawab')
+    claude.add('out', 'di luar', 'jawab')
+    claude.cwd = {'in': 'D:\\Proj\\app', 'out': 'D:\\Lain'}
+    cfg = {'routes': [['claude', 'delta'], ['claude', 'codex', 'D:\\Proj']], 'since_days': 0}
+    moved = core.sync_all(cfg, {'claude': claude, 'codex': codex, 'delta': delta})
+    assert sorted(r[1:3] for r in moved) == [('codex', 'in'), ('delta', 'out')], moved
+    os.environ['CODEX_HOME'] = str(box / 'no-codex')
 
     # delta-sync coexistence.
     fresh(root, 'mirror')
@@ -222,6 +236,7 @@ def check_engine(root):
     assert core.effective_routes([('codex', 'delta')], None)[0] == [('codex', 'delta')]
     folders = [('claude', 'codex', 'D:\\A'), ('claude', 'delta', 'D:\\B'), ('claude', 'delta', 'D:\\A')]
     assert core.effective_routes(folders, mirror)[0] == folders[:2], 'a folder route to codex only covers that folder'
+    assert core.effective_routes([folders[0], ('claude', 'delta', 'D:\\A\\sub')], mirror)[0] == folders[:1], 'subfolder is covered'
 
     # Moving a mirrored Delta thread by hand takes its Codex original, once; nothing copied is never "already there".
     cx, dl, oc = Mem('codex'), Mem('delta'), Mem('opencode')
@@ -911,8 +926,13 @@ def check_gui(root):
         gui.routes.selection_set('end')
         gui.del_route()
         assert len(core.load_cfg()['routes']) == 2
+        gui.route_folder.set('proj')  # A relative folder never matches a session's absolute cwd.
+        gui.add_route()
+        assert len(core.load_cfg()['routes']) == 2 and errors.pop().startswith('Folder proyek harus'), errors
         lnk = Path(app.make_shortcut(box))
         assert lnk == box / 'Session Bridge.lnk' and lnk.stat().st_size, lnk
+        with contextlib.suppress(RuntimeError):
+            raise AssertionError(f'a failed save must not claim success: {app.make_shortcut(box / "tidak-ada")}')
 
         assert not app.login_enabled()
         app.set_login(True)
